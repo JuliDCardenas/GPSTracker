@@ -9,3 +9,30 @@ in the development cycle.
 
 More information about PlatformIO Unit Testing:
 - https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+
+
+Cómo compilar y subir cada uno (rápido)
+En la terminal del proyecto:
+Flashear el passthrough
+pio run -e at_passthrough -t upload
+pio device monitor -e at_passthrough
+​
+Volver al firmware principal
+pio run -e tracker -t upload
+pio device monitor -e tracker
+
+## Cambiar entre firmwares (rápido)
+
+- **Firmware principal (tracker):**
+    - Subir: `pio run -e tracker -t upload`
+    - Monitor: `pio device monitor -e tracker`
+- **Utilidad módem (AT passthrough):**
+    - Subir: `pio run -e at_passthrough -t upload`
+    - Monitor: `pio device monitor -e at_passthrough`
+
+<aside>
+💡
+
+Atajo mental: **tracker = firmware real** / **at_passthrough = diagnóstico módem**.
+
+</aside>
