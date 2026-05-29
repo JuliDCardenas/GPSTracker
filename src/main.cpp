@@ -1,23 +1,40 @@
 #include <Arduino.h>
 
-#define MODEM_RX 4   // RX del ESP (viene del TX del módem)
-#define MODEM_TX 5   // TX del ESP (va al RX del módem)
+#define MODEM_RX 5   // ESP32 recibe desde TX del modem
+#define MODEM_TX 4   // ESP32 envía hacia RX del modem
+#define MODEM_PWRKEY 46
+
+HardwareSerial SerialAT(1);
+
+void modemPowerOn() {
+  pinMode(MODEM_PWRKEY, OUTPUT);
+  digitalWrite(MODEM_PWRKEY, HIGH);
+  delay(100);
+  // Pulso típico PWRKEY: mantener LOW ~1s y soltar (depende del módulo)
+  digitalWrite(MODEM_PWRKEY, LOW);
+  delay(1200);
+  digitalWrite(MODEM_PWRKEY, HIGH);
+  delay(3000);
+}
 
 void setup() {
   Serial.begin(115200);
-  delay(1200);
-  Serial.println("\nBoot OK");
+  delay(500);
 
-  Serial1.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
-  delay(300);
+  Serial.println("\n[BOOT] AT Passthrough starting...");
+  modemPowerOn();
 
-  Serial.println("Sending AT...");
-  Serial1.println("AT");
+  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  Serial.println("[BOOT] Type AT commands here. Expect OK.");
 }
 
 void loop() {
-  while (Serial1.available()) {
-    Serial.write(Serial1.read());
+  // PC -> Modem
+  while (Serial.available()) {
+    SerialAT.write(Serial.read());
   }
-  delay(10);
+  // Modem -> PC
+  while (SerialAT.available()) {
+    Serial.write(SerialAT.read());
+  }
 }
