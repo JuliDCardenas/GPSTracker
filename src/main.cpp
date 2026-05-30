@@ -30,7 +30,8 @@ const char USER[] = "";              // normalmente vacío
 const char PASS[] = "";              // normalmente vacío
 
 const char MQTT_HOST[] = "mqtt.julidcardenas.site";
-const int  MQTT_PORT   = 8883;       // TLS
+// const int  MQTT_PORT   = 8883;       // TLS
+const int  MQTT_PORT   = 1883;       // SIN TLS
 const char MQTT_USER[] = "julian";
 const char MQTT_PASS[] = "8aDpW3sm9BLZKS";  // <-- tu pass real
 
@@ -91,18 +92,37 @@ static void ensureLTE() {
 static void ensureMQTT() {
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
 
-  // Para pruebas rápidas TLS sin validar certificado:
-  // (equivalente a --insecure en mosquitto_sub)
-  // tlsClient.setInsecure();
-
   while (!mqtt.connected()) {
-    SerialMon.print("[MQTT] Connecting...");
-    String clientId = String("logan-gps-") + String((uint32_t)ESP.getEfuseMac(), HEX);
+    SerialMon.print("[MQTT] Connecting... ");
+
+    String clientId = String("logan-") + String((uint32_t)ESP.getEfuseMac(), HEX);
+
+    // Antes de MQTT: prueba el socket TCP a 1883 (debug brutal)
+    SerialMon.print("[TCP] connect ");
+    SerialMon.print(MQTT_HOST);
+    SerialMon.print(":");
+    SerialMon.print(MQTT_PORT);
+    SerialMon.print(" ... ");
+
+    if (netClient.connect(MQTT_HOST, MQTT_PORT)) {
+      SerialMon.println("OK");
+      netClient.stop();
+    } else {
+      SerialMon.println("FAIL");
+    }
+
+
 
     bool ok = mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS);
-    SerialMon.println(ok ? " OK" : " FAIL");
 
-    if (!ok) delay(2000);
+    if (ok) {
+      SerialMon.println("OK");
+      return;
+    }
+
+    SerialMon.print("FAIL state=");
+    SerialMon.println(mqtt.state()); // <-- CLAVE
+    delay(2000);
   }
 }
 
