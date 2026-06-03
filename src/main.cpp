@@ -180,15 +180,11 @@ void loop() {
       return;
     }
 
-    // JSON compacto (sin ArduinoJson por ahora)
     char payload[256];
     snprintf(payload, sizeof(payload),
-      "{\"device_id\":\"%s\",\"fix\":%u,\"lat\":%.6f,\"lon\":%.6f,"
-      "\"speed\":%.2f,\"alt\":%.1f,\"vsat\":%d,\"acc\":%.2f,"
-      "\"ts\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\"}",
-      DEVICE_ID, fix, lat, lon, speed, alt, vsat, acc,
-      year, month, day, hour, min, sec
-    );
+             "v1,%s,%u,%.6f,%.6f,%.2f,%.1f,%d,%.2f,%04d-%02d-%02dT%02d:%02d:%02dZ",
+             DEVICE_ID, fix, lat, lon, speed, alt, vsat, acc,
+             year, month, day, hour, min, sec);
 
     bool pubOk = mqtt.publish(TOPIC_TELEMETRY, payload);
     SerialMon.printf("[PUB] %s topic=%s payload=%s\n", pubOk ? "OK" : "FAIL", TOPIC_TELEMETRY, payload);
