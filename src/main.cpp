@@ -43,7 +43,7 @@ TinyGsmClient netClient(modem);
 PubSubClient mqtt(netClient);
 
 // ---------- Timing ----------
-static const uint32_t GPS_PERIOD_MS = 10000;
+static const uint32_t GPS_PERIOD_MS = 5000;  // Acá definimos la latencía de envío de los datos
 
 // ---------- Helpers ----------
 static void modemPowerOn() {
