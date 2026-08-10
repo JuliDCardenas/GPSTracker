@@ -66,6 +66,7 @@ static bool     g_accCandidate     = false;
 static uint32_t g_candidateStartMs = 0;
 static uint32_t g_offGraceStartMs  = 0;
 static bool     g_modemReady       = false; // modem+LTE+GPS listos
+static bool     g_modemSleeping    = false; // módem dormido (CSCLK+DTR), GNSS off, SIN poweroff
 static bool     g_parkedSent       = false; // ya mandamos el aviso 'parked' en este ciclo OFF
 
 // ---------- Cache del último fix bueno ----------
@@ -186,8 +187,38 @@ static void gpsOff() {
   modem.disableGPS();
 }
 
-// Enciende todo el stack (lazy init al entrar a NORMAL)
+// Despierta el módem desde sleep y reactiva GNSS -> warm/hot start (segundos).
+static bool modemWakeGnssOn() {
+  SerialMon.println("[MODEM] wake + GNSS on (warm start)");
+  digitalWrite(MODEM_DTR_PIN, LOW);   // DTR bajo -> saca el módem del sleep
+  delay(50);
+  modem.sendAT("+CSCLK=0");           // desactiva slow-clock mientras opera
+  modem.waitResponse();
+
+  // Revalidar interfaz AT tras el wake
+  uint32_t t0 = millis();
+  while (!modem.testAT(1000)) {
+    if (millis() - t0 > 10000) { SerialMon.println("[WAKE] AT timeout"); return false; }
+    delay(200);
+  }
+
+  // Revalidar red + datos + MQTT
+  if (!modem.isNetworkConnected() && !modem.waitForNetwork(60000L)) return false;
+  if (!modem.isGprsConnected() && !ensureLTE()) return false;
+  if (!ensureMQTT()) return false;
+
+  gpsOn();                            // AT+CGNSSPWR=1 -> el GNSS retiene efemérides -> warm/hot
+  return true;
+}
+
+// Enciende todo el stack. Si veníamos de sleep -> warm start (sin power-cycle).
 static bool modemBringUp() {
+  if (g_modemSleeping) {
+    bool ok = modemWakeGnssOn();
+    if (ok) g_modemSleeping = false;
+    return ok;
+  }
+  // Arranque en frío real (primer arranque o tras poweroff)
   modemPowerOn();
   SerialAT.begin(MODEM_BAUDRATE, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
   if (!waitForAT()) return false;
@@ -197,13 +228,17 @@ static bool modemBringUp() {
   return true;
 }
 
-// Apaga todo el stack para bajar consumo (ACC OFF)
-static void modemBringDown() {
-  gpsOff();
-  SerialMon.println("[MODEM] off");
-  modem.gprsDisconnect();
-  modem.poweroff();
-  g_modemReady = false;
+// OPCIÓN 1: en vez de poweroff, apaga SOLO el GNSS y duerme el módem (CSCLK+DTR).
+// El módem queda alimentado -> el GNSS conserva efemérides -> próximo fix en warm/hot start.
+static void modemSleepGnssOff() {
+  SerialMon.println("[MODEM] GNSS off + sleep (warm start, sin PWRKEY)");
+  modem.disableGPS();                 // AT+CGNSSPWR=0 (apaga solo el GNSS)
+  modem.gprsDisconnect();             // libera datos; el módem sigue registrado/alimentado
+  modem.sendAT("+CSCLK=1");           // habilita sleep controlado por DTR
+  modem.waitResponse();
+  digitalWrite(MODEM_DTR_PIN, HIGH);  // DTR alto -> el módem entra a sleep
+  g_modemSleeping = true;
+  g_modemReady    = false;
 }
 
 // Lee un fix; lo marca válido si fix>=2
@@ -298,8 +333,8 @@ static void runModemOff() {
       g_lastFix = g;
       publishParked(g);
       g_parkedSent = true;
-      SerialMon.println("[MODEM_OFF] parked con fix fresco -> power down");
-      modemBringDown();
+      SerialMon.println("[MODEM_OFF] parked con fix fresco -> sleep + GNSS off");
+      modemSleepGnssOff();
       g_offGraceStartMs = 0;
       return;
     }
@@ -309,12 +344,12 @@ static void runModemOff() {
   if (millis() - g_offGraceStartMs >= MODEM_OFF_GRACE_MS) {
     if (!g_parkedSent && g_lastFix.valid) {
       publishParked(g_lastFix);
-      SerialMon.println("[MODEM_OFF] parked con último fix cacheado -> power down");
+      SerialMon.println("[MODEM_OFF] parked con último fix cacheado -> sleep + GNSS off");
     } else if (!g_parkedSent) {
-      SerialMon.println("[MODEM_OFF] sin fix disponible; apago sin 'parked'");
+      SerialMon.println("[MODEM_OFF] sin fix disponible; duermo sin 'parked'");
     }
     g_parkedSent = true;
-    modemBringDown();
+    modemSleepGnssOff();
     g_offGraceStartMs = 0;
   }
 }
