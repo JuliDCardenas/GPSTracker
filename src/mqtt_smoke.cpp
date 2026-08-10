@@ -1,3 +1,5 @@
+#include "secrets.h"
+
 #define TINY_GSM_RX_BUFFER 1024
 #define SerialMon Serial
 #define TINY_GSM_DEBUG SerialMon
@@ -30,18 +32,6 @@ TinyGsm modem(SerialAT);
 TinyGsmClient netClient(modem);
 PubSubClient mqtt(netClient);
 
-// ---------- LTE ----------
-const char APN[] = "internet";
-const char APN_USER[] = "";
-const char APN_PASS[] = "";
-
-// ---------- MQTT ----------
-// OJO: por ahora usa las credenciales que ya tienes en tu main.cpp.
-// No las pegues en el chat.
-const char MQTT_HOST[] = "mqtt.julidcardenas.site";
-const int MQTT_PORT = 1883;
-const char MQTT_USER[] = "julian";
-const char MQTT_PASS[] = "8aDpW3sm9BLZKS";
 
 const char DEVICE_ID[] = "Lilygo";
 const char TOPIC_TEST[] = "tracker/Lilygo/test";

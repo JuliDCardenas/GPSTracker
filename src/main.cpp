@@ -1,3 +1,5 @@
+#include "secrets.h"
+
 #define TINY_GSM_RX_BUFFER 1024
 #define SerialMon Serial
 #define TINY_GSM_DEBUG SerialMon
