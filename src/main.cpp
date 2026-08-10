@@ -44,16 +44,6 @@ TinyGsm        modem(SerialAT);
 TinyGsmClient  netClient(modem);
 PubSubClient   mqtt(netClient);
 
-// ---------- LTE / MQTT config ----------
-const char APN[]  = "internet"; // <-- APN real de tu SIM
-const char USER[] = "";
-const char PASS[] = "";
-
-const char MQTT_HOST[] = "mqtt.julidcardenas.site";
-const int  MQTT_PORT   = 1883;  // sin TLS
-const char MQTT_USER[] = "julian";
-const char MQTT_PASS[] = "8aDpW3sm9BLZKS";
-
 const char DEVICE_ID[]       = "Lilygo";
 const char TOPIC_TELEMETRY[] = "tracker/Lilygo/telemetria";
 
@@ -146,7 +136,7 @@ static bool ensureLTE() {
   SerialMon.println(" OK");
 
   SerialMon.print("Connecting GPRS/APN...");
-  if (!modem.gprsConnect(APN, USER, PASS)) { SerialMon.println(" FAIL"); return false; }
+  if (!modem.gprsConnect(APN, APN_USER, APN_PASS)) { SerialMon.println(" FAIL"); return false; }
   SerialMon.println(" OK");
 
   SerialMon.print("IP: ");
