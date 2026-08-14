@@ -49,21 +49,51 @@ PubSubClient mqtt(netClient);
 // ---------- Timing ----------
 static const uint32_t GPS_PERIOD_MS = 5000;  // Acá definimos la latencía de envío de los datos
 
-// ---------- GPS validation ----------
+// ---------- Validación GNSS ----------
 static const float MAX_VALID_SPEED_KMH = 180.0f;
 static const float MIN_VALID_ALTITUDE_M = -9990.0f;
 static const int MIN_VALID_SATELLITES = 5;
 static const float MAX_VALID_HDOP = 2.5f;
 
-static bool isGpsDataValid(uint8_t fix, float lat, float lon, float speedKmh, float altitudeM, int satellites, float hdop) {
+// Bitmask de calidad para CSV v2:
+// bit 0 = altitud válida
+// bit 1 = velocidad válida
+// Valores posibles:
+// 0 = altitud inválida + velocidad inválida
+// 1 = altitud válida + velocidad inválida
+// 2 = altitud inválida + velocidad válida
+// 3 = altitud válida + velocidad válida
+static const uint8_t GPS_QUALITY_ALT_VALID = 1;
+static const uint8_t GPS_QUALITY_SPEED_VALID = 2;
+
+static bool isGpsPositionValid(uint8_t fix, float lat, float lon, int satellites, float hdop) {
   bool hasFix = fix >= 2;  // 2D/3D fix
   bool hasValidPosition = lat >= -90.0f && lat <= 90.0f && lon >= -180.0f && lon <= 180.0f && !(lat == 0.0f && lon == 0.0f);
-  bool hasValidSpeed = speedKmh >= 0.0f && speedKmh <= MAX_VALID_SPEED_KMH;
-  bool hasValidAltitude = altitudeM > MIN_VALID_ALTITUDE_M;
   bool hasEnoughSatellites = satellites >= MIN_VALID_SATELLITES;
   bool hasGoodPrecision = hdop > 0.0f && hdop <= MAX_VALID_HDOP;
 
-  return hasFix && hasValidPosition && hasValidSpeed && hasValidAltitude && hasEnoughSatellites && hasGoodPrecision;
+  return hasFix && hasValidPosition && hasEnoughSatellites && hasGoodPrecision;
+}
+
+static bool isGpsSpeedValid(float speedKmh) {
+  return speedKmh >= 0.0f && speedKmh <= MAX_VALID_SPEED_KMH;
+}
+
+static bool isGpsAltitudeValid(float altitudeM) {
+  return altitudeM > MIN_VALID_ALTITUDE_M;
+}
+
+static uint8_t buildGpsQuality(float speedKmh, float altitudeM) {
+  uint8_t quality = 0;
+
+  if (isGpsAltitudeValid(altitudeM)) {
+    quality |= GPS_QUALITY_ALT_VALID;
+  }
+  if (isGpsSpeedValid(speedKmh)) {
+    quality |= GPS_QUALITY_SPEED_VALID;
+  }
+
+  return quality;
 }
 
 // ---------- Helpers ----------
@@ -201,17 +231,36 @@ void loop() {
       return;
     }
 
-    bool gpsDataValid = isGpsDataValid(fix, lat, lon, speed, alt, vsat, acc);
-    if (!gpsDataValid) {
-      SerialMon.printf("[GPS] invalid -> skip publish fix=%u lat=%.6f lon=%.6f speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
+    bool positionValid = isGpsPositionValid(fix, lat, lon, vsat, acc);
+    if (!positionValid) {
+      SerialMon.printf("[GPS] posición inválida -> no se publica fix=%u lat=%.6f lon=%.6f speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
                        fix, lat, lon, speed, alt, vsat, acc);
       return;
     }
 
+    uint8_t quality = buildGpsQuality(speed, alt);
+    bool speedValid = (quality & GPS_QUALITY_SPEED_VALID) != 0;
+    bool altValid = (quality & GPS_QUALITY_ALT_VALID) != 0;
+
+    char speedField[16] = "";
+    char altField[16] = "";
+
+    if (speedValid) {
+      snprintf(speedField, sizeof(speedField), "%.2f", speed);
+    }
+    if (altValid) {
+      snprintf(altField, sizeof(altField), "%.1f", alt);
+    }
+
+    if (!speedValid || !altValid) {
+      SerialMon.printf("[GPS] posición válida con datos parciales quality=%u speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
+                       quality, speed, alt, vsat, acc);
+    }
+
     char payload[256];
     snprintf(payload, sizeof(payload),
-             "v1,%s,%u,%.6f,%.6f,%.2f,%.1f,%d,%.2f,%04d-%02d-%02dT%02d:%02d:%02dZ",
-             DEVICE_ID, fix, lat, lon, speed, alt, vsat, acc,
+             "v2,%s,%u,%.6f,%.6f,%s,%s,%d,%.2f,%u,%04d-%02d-%02dT%02d:%02d:%02dZ",
+             DEVICE_ID, fix, lat, lon, speedField, altField, vsat, acc, quality,
              year, month, day, hour, min, sec);
 
     bool pubOk = mqtt.publish(TOPIC_TELEMETRY, payload);
