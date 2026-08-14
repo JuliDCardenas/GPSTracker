@@ -49,6 +49,23 @@ PubSubClient mqtt(netClient);
 // ---------- Timing ----------
 static const uint32_t GPS_PERIOD_MS = 5000;  // Acá definimos la latencía de envío de los datos
 
+// ---------- GPS validation ----------
+static const float MAX_VALID_SPEED_KMH = 180.0f;
+static const float MIN_VALID_ALTITUDE_M = -9990.0f;
+static const int MIN_VALID_SATELLITES = 5;
+static const float MAX_VALID_HDOP = 2.5f;
+
+static bool isGpsDataValid(uint8_t fix, float lat, float lon, float speedKmh, float altitudeM, int satellites, float hdop) {
+  bool hasFix = fix >= 2;  // 2D/3D fix
+  bool hasValidPosition = lat >= -90.0f && lat <= 90.0f && lon >= -180.0f && lon <= 180.0f && !(lat == 0.0f && lon == 0.0f);
+  bool hasValidSpeed = speedKmh >= 0.0f && speedKmh <= MAX_VALID_SPEED_KMH;
+  bool hasValidAltitude = altitudeM > MIN_VALID_ALTITUDE_M;
+  bool hasEnoughSatellites = satellites >= MIN_VALID_SATELLITES;
+  bool hasGoodPrecision = hdop > 0.0f && hdop <= MAX_VALID_HDOP;
+
+  return hasFix && hasValidPosition && hasValidSpeed && hasValidAltitude && hasEnoughSatellites && hasGoodPrecision;
+}
+
 // ---------- Helpers ----------
 static void modemPowerOn() {
   pinMode(MODEM_DTR_PIN, OUTPUT);
@@ -181,6 +198,13 @@ void loop() {
 
     if (!ok) {
       SerialMon.println("[GPS] read FAIL");
+      return;
+    }
+
+    bool gpsDataValid = isGpsDataValid(fix, lat, lon, speed, alt, vsat, acc);
+    if (!gpsDataValid) {
+      SerialMon.printf("[GPS] invalid -> skip publish fix=%u lat=%.6f lon=%.6f speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
+                       fix, lat, lon, speed, alt, vsat, acc);
       return;
     }
 
