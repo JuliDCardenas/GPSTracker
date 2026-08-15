@@ -61,13 +61,6 @@ def to_float_or_none(value):
 	return float(value)
 
 
-def to_int_or_none(value):
-	value = empty_to_none(value)
-	if value is None:
-		return None
-	return int(value)
-
-
 def parse_ts(ts: str):
 	try:
 		return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
