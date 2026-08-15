@@ -14,6 +14,11 @@
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
 
+// Credenciales locales. Copia include/secrets.example.h como
+// include/secrets.h y completa los valores reales.
+// include/secrets.h esta en .gitignore y no debe subirse al repositorio.
+#include "secrets.h"
+
 // ---------- Pines ----------
 #define MODEM_BAUDRATE 115200
 #define MODEM_TX_PIN        4
@@ -32,16 +37,9 @@
 HardwareSerial SerialAT(1);
 TinyGsm modem(SerialAT);
 
-// ---------- LTE / MQTT config ----------
-const char APN[]  = "internet";      // <-- PON AQUÍ el APN real de tu SIM
-const char USER[] = "";              // normalmente vacío
-const char PASS[] = "";              // normalmente vacío
-
-const char MQTT_HOST[] = "mqtt.julidcardenas.site";
-// const int  MQTT_PORT   = 8883;       // TLS
-const int  MQTT_PORT   = 1883;       // SIN TLS
-const char MQTT_USER[] = "julian";
-const char MQTT_PASS[] = "8aDpW3sm9BLZKS";  // <-- tu pass real
+// ---------- Identidad del dispositivo ----------
+// APN, APN_USER, APN_PASS, MQTT_HOST, MQTT_PORT, MQTT_USER y MQTT_PASS
+// se definen en include/secrets.h
 
 const char DEVICE_ID[] = "Lilygo";
 const char TOPIC_TELEMETRY[] = "tracker/Lilygo/telemetria";
@@ -207,7 +205,7 @@ static void ensureLTE() {
     SerialMon.println("GPRS ya conectado");
   } else {
     SerialMon.print("Connecting GPRS/APN...");
-    if (!modem.gprsConnect(APN, USER, PASS)) {
+    if (!modem.gprsConnect(APN, APN_USER, APN_PASS)) {
       SerialMon.println(" FAIL");
       return;
     }
