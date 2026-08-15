@@ -18,8 +18,10 @@ MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USER = os.getenv("MQTT_USER", "")
 MQTT_PASS = os.getenv("MQTT_PASS", "")
 MQTT_TOPIC = os.getenv("MQTT_TOPIC", "tracker/Lilygo/telemetria")
+MQTT_LWT_TOPIC = os.getenv("MQTT_LWT_TOPIC", "tracker/Lilygo/sys/lwt")
 
 # ---------- TRACCAR (OsmAnd) ----------
+TRACCAR_SCHEME = os.getenv("TRACCAR_SCHEME", "http")
 TRACCAR_HOST = os.getenv("TRACCAR_HOST", "traccar.julidcardenas.site")
 TRACCAR_PORT = int(os.getenv("TRACCAR_PORT", "5055"))
 TRACCAR_DEVICE_ID = os.getenv("TRACCAR_DEVICE_ID", "Lilygo")
@@ -30,7 +32,25 @@ MIN_INTERVAL_SEC = float(os.getenv("MIN_INTERVAL_SEC", "10"))  # no envía más 
 MIN_MOVE_METERS = float(os.getenv("MIN_MOVE_METERS", "20"))    # si no se movió >X m, no envía
 HTTP_TIMEOUT_SEC = float(os.getenv("HTTP_TIMEOUT_SEC", "5"))
 
+# ---------- LWT -> TRACCAR ----------
+# Qué hacer cuando el broker publica el Last Will del tracker (caída de enlace):
+#   off      -> no reenviar nada; Traccar marca offline por su propio status.timeout
+#   event     -> reenviar la última posición conocida con event=deviceOffline (recomendado)
+#   ignition -> reenviar la última posición conocida con ignition=false
+#   both     -> event + ignition en el mismo envío
+#
+# El modo "ignition" ensucia el campo de encendido y los reportes de horas de
+# motor de Traccar, porque una caída de LTE no implica que el motor se apagó.
+# Se deja disponible solo para pruebas; el estado real de ignición llegará con
+# la lectura ADC de la línea ACC y sus eventos engine_on / engine_off.
+LWT_TRACCAR_MODE = os.getenv("LWT_TRACCAR_MODE", "event").strip().lower()
+LWT_OFFLINE_PAYLOAD = os.getenv("LWT_OFFLINE_PAYLOAD", "offline")
+LWT_EVENT_NAME = os.getenv("LWT_EVENT_NAME", "deviceOffline")
+
 # ---------- VALIDACIÓN GNSS ----------
+# OJO: la unidad real que reporta el módem en AT+CGNSSINFO está en verificación
+# (posiblemente nudos y no km/h). No cambiar estos umbrales hasta confirmarlo
+# con una prueba en carretera contra el odómetro del vehículo.
 MAX_VALID_SPEED_KMH = float(os.getenv("MAX_VALID_SPEED_KMH", "180"))
 MIN_VALID_ALTITUDE_M = float(os.getenv("MIN_VALID_ALTITUDE_M", "-9990"))
 MIN_DERIVED_DT_SEC = float(os.getenv("MIN_DERIVED_DT_SEC", "2"))
@@ -45,6 +65,7 @@ _last_lat = None
 _last_lon = None
 _last_payload_sig = None
 _last_valid_point = None
+_last_lwt_payload = None
 
 
 def empty_to_none(value):
@@ -266,7 +287,7 @@ def send_osmand(lat, lon, speed=None, alt=None, ignition=None, event=None):
 	if event and event != "-":
 		params["event"] = event
 
-	url = f"http://{TRACCAR_HOST}:{TRACCAR_PORT}/"
+	url = f"{TRACCAR_SCHEME}://{TRACCAR_HOST}:{TRACCAR_PORT}/"
 	r = requests.get(url, params=params, timeout=HTTP_TIMEOUT_SEC)
 	return r.status_code, r.text[:120]
 
@@ -293,19 +314,64 @@ def should_send(lat, lon, sig):
 	return True, "ok"
 
 
+def handle_lwt(payload: str):
+	"""Procesa el Last Will publicado por el broker cuando el tracker cae."""
+	global _last_lwt_payload
+
+	if payload == _last_lwt_payload:
+		# el LWT es retained: al reconectar el subscriber lo recibe de nuevo
+		logging.info("LWT repetido (%s): ignorado", payload)
+		return
+	_last_lwt_payload = payload
+
+	if payload != LWT_OFFLINE_PAYLOAD:
+		logging.info("LWT %s", payload)
+		return
+
+	logging.warning("LWT %s: el tracker perdió el enlace", payload)
+
+	if LWT_TRACCAR_MODE == "off":
+		return
+
+	if _last_valid_point is None:
+		logging.warning("LWT sin posición previa: no se reenvía a Traccar")
+		return
+
+	event = LWT_EVENT_NAME if LWT_TRACCAR_MODE in ("event", "both") else None
+	ignition = 0 if LWT_TRACCAR_MODE in ("ignition", "both") else None
+
+	try:
+		code, preview = send_osmand(
+			_last_valid_point["lat"], _last_valid_point["lon"],
+			ignition=ignition, event=event,
+		)
+		if code == 200:
+			logging.info(
+				"TRACCAR LWT OK mode=%s lat=%.5f lon=%.5f ev=%s ign=%s",
+				LWT_TRACCAR_MODE, _last_valid_point["lat"], _last_valid_point["lon"],
+				event, ignition,
+			)
+		else:
+			logging.warning("TRACCAR LWT HTTP %s body=%s", code, preview)
+	except Exception as e:
+		logging.warning("TRACCAR LWT send failed: %s", e)
+
+
 def on_connect(client, userdata, flags, rc):
 	if rc == 0:
 		logging.info("MQTT connected")
 		client.subscribe(MQTT_TOPIC)
 		logging.info("Subscribed to %s", MQTT_TOPIC)
+		if LWT_TRACCAR_MODE != "off":
+			client.subscribe(MQTT_LWT_TOPIC)
+			logging.info("Subscribed to %s (mode=%s)", MQTT_LWT_TOPIC, LWT_TRACCAR_MODE)
 	else:
 		logging.error("MQTT connect failed rc=%s", rc)
 
 
-def on_message(client, userdata, msg):
+def handle_telemetry(raw: str):
 	global _last_sent_ts, _last_lat, _last_lon, _last_payload_sig
 
-	raw = msg.payload.decode("utf-8", errors="replace").strip()
 	data = parse_csv(raw)
 	if not data:
 		return
@@ -359,6 +425,16 @@ def on_message(client, userdata, msg):
 			logging.warning("TRACCAR HTTP %s body=%s", code, preview)
 	except Exception as e:
 		logging.warning("TRACCAR send failed: %s", e)
+
+
+def on_message(client, userdata, msg):
+	raw = msg.payload.decode("utf-8", errors="replace").strip()
+
+	if msg.topic == MQTT_LWT_TOPIC:
+		handle_lwt(raw)
+		return
+
+	handle_telemetry(raw)
 
 
 def main():
