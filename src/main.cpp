@@ -76,6 +76,10 @@ static const uint8_t MQTT_FAILS_BEFORE_ESP_RESTART   = 10;
 static const uint32_t WDT_TIMEOUT_SEC = 120;
 
 // ---------- Validación GNSS ----------
+// PENDIENTE: verificar la unidad real que entrega AT+CGNSSINFO. La evidencia
+// de campo (Traccar coincide con el odómetro del vehículo) apunta a que el
+// módem reporta NUDOS y no km/h, por lo que este umbral estaría filtrando en
+// realidad a ~333 km/h. No cambiar hasta confirmarlo con más mediciones.
 static const float MAX_VALID_SPEED_KMH = 180.0f;
 static const float MIN_VALID_ALTITUDE_M = -9990.0f;
 static const int MIN_VALID_SATELLITES = 5;
@@ -96,7 +100,7 @@ static const uint8_t GPS_QUALITY_SPEED_VALID = 2;
 static uint8_t mqttFailCount = 0;
 static uint32_t mqttNextAttemptMs = 0;
 static uint32_t mqttRetryDelayMs = MQTT_RETRY_BASE_MS;
-static bool mqttWasConnected = false;
+static bool bootStatusPublished = false;
 
 static bool isGpsPositionValid(uint8_t fix, float lat, float lon, int satellites, float hdop) {
   bool hasFix = fix >= 2;  // 2D/3D fix
@@ -263,8 +267,11 @@ static bool tryConnectMQTT() {
   if (ok) {
     SerialMon.println("OK");
     mqtt.publish(TOPIC_LWT, LWT_ONLINE, true);
-    publishStatus(mqttWasConnected ? "mqtt_reconnected" : "mqtt_connected");
-    mqttWasConnected = true;
+    // TOPIC_STATUS es retained: el último publicado es el que queda en el
+    // broker. Por eso "boot" se publica aquí, en la primera conexión de la
+    // sesión, y no después en setup(), donde sobrescribiría el estado real.
+    publishStatus(bootStatusPublished ? "mqtt_reconnected" : "boot");
+    bootStatusPublished = true;
     mqttFailCount = 0;
     mqttRetryDelayMs = MQTT_RETRY_BASE_MS;
     return true;
@@ -327,9 +334,9 @@ void setup() {
   // 1) LTE up
   ensureLTE();
 
-  // 2) MQTT up (primer intento; el loop se encarga de reintentar)
+  // 2) MQTT up (primer intento; el loop se encarga de reintentar).
+  //    El status "boot" lo publica tryConnectMQTT() al conectar.
   tryConnectMQTT();
-  publishStatus("boot");
 
   // 3) GPS on
   SerialMon.println("Enabling GPS...");
