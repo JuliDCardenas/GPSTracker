@@ -347,6 +347,18 @@ void setup() {
   }
   SerialMon.println("\nGPS Enabled");
   modem.setGPSBaud(115200);
+
+  // Modo GNSS multi-constelacion: 15 = GPS + GLONASS + GALILEO + BDS.
+  // AT+CGNSSMODE solo es aceptado por el modem cuando el GNSS ya esta
+  // encendido (verificado en banco 2026-08-16, firmware SIM767XM5_B05V01_241206),
+  // por eso va DESPUES de enableGPS(). El valor persiste en la NVRAM del
+  // modem (sobrevive reflashes del ESP32 y apagados), pero se fija en cada
+  // boot para que el comportamiento sea deterministico.
+  if (modem.setGPSMode(15)) {
+    SerialMon.println("GNSS mode 15 (GPS+GLONASS+GALILEO+BDS)");
+  } else {
+    SerialMon.println("GNSS mode 15 FAIL (no critico, sigue en modo actual)");
+  }
 }
 
 void loop() {
