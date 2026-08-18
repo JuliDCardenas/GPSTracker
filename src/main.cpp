@@ -19,9 +19,15 @@
 // cuesta 30-60 s de re-attach a plena potencia: pulso de PWRKEY, waitForNetwork,
 // gprsConnect, mqtt.connect y el TTFF del GNSS (sin A-GNSS, porque AT+CAGPS da
 // ERROR en el firmware B05V01_241206). Con intervalos cortos, dormir sale mas
-// caro que quedarse despierto. El apagado del GNSS, el sleep del modem y el
-// deep sleep del ESP32 (con wake por GPIO9, que es RTC-capable en el S3) quedan
-// para despues de la prueba de autonomia con la 18650.
+// caro que quedarse despierto.
+//
+// MEDIDO (noche del 2026-08-17 al 18, 8 h 22 min parqueado con keepalive de
+// 20 min): 25 de 25 keepalives entregados, cero reconexiones MQTT, y la 18650
+// bajo de ~4.11 V a 3.79 V, unos 38 mV/h. Autonomia estimada del Nivel 1:
+// 15-18 h. Con solo 25 transmisiones en 8 horas, el intervalo del keepalive es
+// irrelevante para el consumo: lo que cuesta es tener el modem enganchado y el
+// GNSS encendido. El siguiente salto real es el Nivel 2 (AT+CGNSSPWR=0 entre
+// keepalives y modem dormido por DTR), no publicar menos seguido.
 // ============================================================================
 
 #include <Arduino.h>
@@ -119,6 +125,11 @@ PubSubClient mqtt(netClient);
 // subscriber marca la trama como evento y salta el rate-limit, el filtro de
 // movimiento minimo y el descarte por fix bajo. Por eso los keepalive de
 // parqueo y el punto de apagado siempre llegan a Traccar.
+//
+// VALIDADO en la noche del 2026-08-17 al 18: con el motor encendido y el equipo
+// quieto, el servidor descarto cada trama con "Skip: no_move_0.2m"; parqueado,
+// tramas practicamente identicas pasaron las 25 veces gracias al bypass por
+// ignition=0. Sin ese bypass no habria quedado ni un punto de la noche.
 const char EVENT_NONE[]       = "-";
 const char EVENT_ENGINE_ON[]  = "engine_on";
 const char EVENT_ENGINE_OFF[] = "engine_off";
@@ -197,11 +208,19 @@ static const uint32_t IGN_SAMPLE_MS   = 250;
 // algo pasa con el divisor: soldadura fria, cable suelto, Zener en corto.
 static const uint32_t IGN_MIDZONE_WARN_MS = 120000;
 
-// Factor del divisor de bateria de la placa (teorico 2.0 para 100k/100k).
-// TODO CALIBRAR: medir con multimetro en los bornes de la 18650 y ajustar,
-// exactamente como hubo que hacerlo con el divisor de ignicion, donde el
-// teorico 1.6912 resulto ser 1.9366 en la vida real. Mientras no se calibre,
-// este voltaje sirve para ver tendencia, no para disparar alertas finas.
+// Factor del divisor de bateria de la placa (100k/100k = 2.0 teorico).
+//
+// CALIBRADO (2026-08-18). Medicion en banco con la 18650 ya descargada tras una
+// noche de keepalive:
+//   bornes de la bateria (multimetro) : 3.79 V
+//   reportado por el firmware         : 3.78 V
+// Error de 10 mV (0.26 %), dentro del error propio del ADC. El factor teorico
+// queda confirmado y NO requiere ajuste.
+//
+// Contraste util con el divisor de ignicion, donde el teorico 1.6912 resulto ser
+// 1.9366 en la vida real: alli hay un Zener fugando en paralelo con R2 sobre un
+// divisor de solo 40 uA. Aqui el divisor de la placa esta limpio, sin nada en
+// paralelo, y por eso la teoria si acierta.
 static const float BAT_DIVIDER_FACTOR = 2.0f;
 
 // ---------- Validación GNSS ----------
@@ -290,11 +309,12 @@ static bool isGpsAltitudeValid(float altitudeM) {
 // De vez en cuando el modem entrega una respuesta +CGNSSINFO truncada o mezclada
 // con un URC, y TinyGSM la da por buena. En banco (2026-08-18, 03:47 UTC) se
 // vieron dos tramas seguidas con fecha "-7999-34-00T00:59:00Z", velocidad y
-// altitud invalidas, y un HDOP de 0.87 cuando sus vecinas estaban en 0.65.
-// Ahi la lat/lon salio bien de casualidad; si el parseo se corre un campo,
-// publicariamos una coordenada basura y Traccar dibuja el carro en otro pais.
-// La fecha es el canario mas confiable del parseo, y con cadencia de 5 s
-// descartar la trama completa no cuesta nada.
+// altitud invalidas, y un HDOP de 0.87 cuando sus vecinas estaban en 0.65; a
+// las 03:58 UTC aparecio una tercera, que el subscriber reporto como
+// "timestamp no confiable". Ahi la lat/lon salio bien de casualidad; si el
+// parseo se corre un campo, publicariamos una coordenada basura y Traccar
+// dibuja el carro en otro pais. La fecha es el canario mas confiable del
+// parseo, y con cadencia de 5 s descartar la trama completa no cuesta nada.
 static bool isGpsTimeValid(int year, int month, int day, int hour, int minute, int second) {
   return year >= 2024 && year <= 2099 &&
          month >= 1 && month <= 12 &&
@@ -462,7 +482,8 @@ static uint32_t currentPeriodMs() {
   // solo cuando hay movimiento real. Si dependiera unicamente del movimiento, un
   // vehiculo encendido y quieto (un trancon, o el banco de pruebas) nunca
   // bajaria a cadencia lenta: se detecto asi en banco el 2026-08-18, publicando
-  // cada 5 s durante un minuto entero con velocidad 0.00.
+  // cada 5 s durante un minuto entero con velocidad 0.00. El servidor descarto
+  // todas esas tramas con "Skip: no_move", asi que era gasto de radio puro.
   if ((millis() - lastMovementMs) > MOVING_HOLD_MS) {
     return IDLE_PERIOD_MS;
   }
@@ -558,6 +579,11 @@ static bool tryConnectMQTT() {
   // El LWT NO se mapea a ignition=false en el subscriber (modo "event"):
   // una caida de LTE no significa que el motor se apago. El estado real de
   // ignicion es el que publica este firmware desde el ADC.
+  //
+  // Nota operativa: como el clientId es fijo, al reflashear el broker expulsa
+  // la sesion anterior y publica su will. Por eso en los logs del servidor se
+  // ve un "offline" seguido de un "online" unos 200 ms despues; es la toma de
+  // relevo, no una caida de enlace.
   bool ok = mqtt.connect(
       clientId.c_str(),
       MQTT_USER,
@@ -575,8 +601,10 @@ static bool tryConnectMQTT() {
     // sesión, y no después en setup(), donde sobrescribiría el estado real.
     //
     // Sirve de forense: si despues de una noche corriendo el retained sigue en
-    // "boot", el ESP32 no se reinicio; si dice "mqtt_reconnected", hubo caidas
-    // de enlace pero el firmware sobrevivio.
+    // "boot", no hubo ni una reconexion MQTT desde el arranque; si dice
+    // "mqtt_reconnected", hubo caidas de enlace pero el firmware sobrevivio.
+    // Verificado en la noche del 2026-08-17 al 18: amanecio en "boot" tras
+    // 8 h 22 min y 25 keepalives sin perder uno.
     publishStatus(bootStatusPublished ? "mqtt_reconnected" : "boot");
     bootStatusPublished = true;
 
@@ -812,7 +840,7 @@ static void serviceBattery() {
   mqtt.publish(TOPIC_BATTERY, buf, true);
   lastBatteryMs = now;
   batteryEverPublished = true;
-  SerialMon.printf("[BAT] %s V (factor %.2f SIN CALIBRAR)\n", buf, BAT_DIVIDER_FACTOR);
+  SerialMon.printf("[BAT] %s V\n", buf);
 }
 
 void setup() {
@@ -833,8 +861,7 @@ void setup() {
   SerialMon.printf("[IGN] boot pin=%.3fV vbus=%.2fV (sense %s)\n",
                    bootPinV, bootPinV * DIVIDER_FACTOR,
                    IGNITION_SENSE_ENABLED ? "activo" : "desactivado");
-  SerialMon.printf("[BAT] boot %.2fV (factor %.2f SIN CALIBRAR)\n",
-                   readBatteryVolts(), BAT_DIVIDER_FACTOR);
+  SerialMon.printf("[BAT] boot %.2fV\n", readBatteryVolts());
 
   modemPowerOn();
   SerialAT.begin(MODEM_BAUDRATE, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
