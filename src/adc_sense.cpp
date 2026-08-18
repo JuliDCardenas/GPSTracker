@@ -35,9 +35,9 @@ void setup() {
   delay(500);
 
   analogReadResolution(12);
-  // Atenuacion 12dB -> rango util ~0-3.1V (cubre los 2.96V del divisor).
-  // Si compilas con core Arduino 2.x, cambiar a ADC_11db.
-  analogSetPinAttenuation(SENSE_PIN, ADC_12db);
+  // Atenuacion 11dB -> rango util ~0-3.1V (cubre los 2.96V del divisor).
+  // (Core Arduino 3.x: el nombre equivalente es ADC_12db.)
+  analogSetPinAttenuation(SENSE_PIN, ADC_11db);
 
   Serial.println();
   Serial.println("[ADC_SENSE] GPIO9 (ADC1_CH8) - prueba divisor de ignicion");
