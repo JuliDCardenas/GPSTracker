@@ -266,6 +266,7 @@ static GpsPoint lastValidPoint = {};
 static uint32_t lastMovementMs = 0;
 static uint32_t lastPublishMs = 0;
 static uint32_t lastBatteryMs = 0;
+static bool batteryEverPublished = false;
 
 static bool isGpsPositionValid(uint8_t fix, float lat, float lon, int satellites, float hdop) {
   bool hasFix = fix >= 2;  // 2D/3D fix
@@ -282,6 +283,25 @@ static bool isGpsSpeedValid(float speedKmh) {
 
 static bool isGpsAltitudeValid(float altitudeM) {
   return altitudeM > MIN_VALID_ALTITUDE_M;
+}
+
+// Detector de parseo corrupto del GNSS.
+//
+// De vez en cuando el modem entrega una respuesta +CGNSSINFO truncada o mezclada
+// con un URC, y TinyGSM la da por buena. En banco (2026-08-18, 03:47 UTC) se
+// vieron dos tramas seguidas con fecha "-7999-34-00T00:59:00Z", velocidad y
+// altitud invalidas, y un HDOP de 0.87 cuando sus vecinas estaban en 0.65.
+// Ahi la lat/lon salio bien de casualidad; si el parseo se corre un campo,
+// publicariamos una coordenada basura y Traccar dibuja el carro en otro pais.
+// La fecha es el canario mas confiable del parseo, y con cadencia de 5 s
+// descartar la trama completa no cuesta nada.
+static bool isGpsTimeValid(int year, int month, int day, int hour, int minute, int second) {
+  return year >= 2024 && year <= 2099 &&
+         month >= 1 && month <= 12 &&
+         day >= 1 && day <= 31 &&
+         hour >= 0 && hour <= 23 &&
+         minute >= 0 && minute <= 59 &&
+         second >= 0 && second <= 59;
 }
 
 static uint8_t buildGpsQuality(float speedKmh, float altitudeM) {
@@ -438,8 +458,12 @@ static uint32_t currentPeriodMs() {
   if (isIgnitionOff()) {
     return PARKED_KEEPALIVE_MIN * 60000UL;
   }
-  // Si nunca se ha detectado movimiento (recien arranco) se asume en marcha.
-  if (lastMovementMs != 0 && (millis() - lastMovementMs) > MOVING_HOLD_MS) {
+  // lastMovementMs se inicializa en setup() y se refresca en cada engine_on, no
+  // solo cuando hay movimiento real. Si dependiera unicamente del movimiento, un
+  // vehiculo encendido y quieto (un trancon, o el banco de pruebas) nunca
+  // bajaria a cadencia lenta: se detecto asi en banco el 2026-08-18, publicando
+  // cada 5 s durante un minuto entero con velocidad 0.00.
+  if ((millis() - lastMovementMs) > MOVING_HOLD_MS) {
     return IDLE_PERIOD_MS;
   }
   return GPS_PERIOD_MS;
@@ -549,6 +573,10 @@ static bool tryConnectMQTT() {
     // TOPIC_STATUS es retained: el último publicado es el que queda en el
     // broker. Por eso "boot" se publica aquí, en la primera conexión de la
     // sesión, y no después en setup(), donde sobrescribiría el estado real.
+    //
+    // Sirve de forense: si despues de una noche corriendo el retained sigue en
+    // "boot", el ESP32 no se reinicio; si dice "mqtt_reconnected", hubo caidas
+    // de enlace pero el firmware sobrevivio.
     publishStatus(bootStatusPublished ? "mqtt_reconnected" : "boot");
     bootStatusPublished = true;
 
@@ -632,6 +660,14 @@ static bool readGpsPoint(GpsPoint &out) {
     return false;
   }
 
+  // Canario de parseo corrupto: si la fecha no existe en este planeta, el resto
+  // de la trama tampoco es confiable aunque la lat/lon se vea razonable.
+  if (!isGpsTimeValid(year, month, day, hour, min, sec)) {
+    SerialMon.printf("[GPS] trama corrupta, fecha %04d-%02d-%02dT%02d:%02d:%02d -> descartada\n",
+                     year, month, day, hour, min, sec);
+    return false;
+  }
+
   uint8_t quality = buildGpsQuality(speed, alt);
 
   out.valid = true;
@@ -711,6 +747,12 @@ static void serviceEvents() {
   // Estado retenido para n8n y depuracion.
   mqtt.publish(TOPIC_IGNITION, isOn ? "on" : "off", true);
 
+  if (isOn) {
+    // Arranca el reloj del ralenti: tras encender, el vehiculo tiene garantizada
+    // la cadencia rapida durante MOVING_HOLD_MS aunque todavia no se mueva.
+    lastMovementMs = millis();
+  }
+
   // Al encender vale la pena intentar un punto fresco. Al apagar tambien se
   // intenta, pero si el GNSS no responde se publica la ultima posicion valida:
   // ese es justamente el "aqui quedo parqueado".
@@ -755,11 +797,11 @@ static void serviceBattery() {
   uint32_t period = isIgnitionOff() ? (PARKED_KEEPALIVE_MIN * 60000UL) : BATTERY_PERIOD_MS;
 
   uint32_t now = millis();
-  if ((now - lastBatteryMs) < period) {
+  // La primera lectura sale apenas hay enlace. Sin esto, con el motor encendido
+  // nos quedabamos sin dato de bateria los primeros 5 minutos (banco 2026-08-18).
+  if (batteryEverPublished && (now - lastBatteryMs) < period) {
     return;
   }
-  lastBatteryMs = now;
-
   if (!mqtt.connected()) {
     return;
   }
@@ -768,6 +810,8 @@ static void serviceBattery() {
   char buf[16];
   snprintf(buf, sizeof(buf), "%.2f", volts);
   mqtt.publish(TOPIC_BATTERY, buf, true);
+  lastBatteryMs = now;
+  batteryEverPublished = true;
   SerialMon.printf("[BAT] %s V (factor %.2f SIN CALIBRAR)\n", buf, BAT_DIVIDER_FACTOR);
 }
 
@@ -778,6 +822,10 @@ void setup() {
   watchdogSetup();
 
   adcSetup();
+
+  // Arranca el reloj del ralenti desde el boot. Sin esto, un vehiculo encendido
+  // que nunca supera MOVING_SPEED_KMH se queda para siempre en cadencia rapida.
+  lastMovementMs = millis();
 
   // Lectura informativa de arranque. El estado real se resuelve en el loop con
   // su antirrebote: hasta entonces IGN_UNKNOWN se comporta como encendido.
