@@ -280,7 +280,7 @@ static void adcSetup() {
   analogReadResolution(12);
   // Atenuacion 12dB -> rango util ~0-3.1V (cubre los 2.96V del divisor).
   // Core Arduino 2.x: cambiar a ADC_11db.
-  analogSetPinAttenuation(SENSE_PIN, ADC_12db);
+  analogSetPinAttenuation(SENSE_PIN, ADC_11db);
 }
 
 static float readPinVolts() {
