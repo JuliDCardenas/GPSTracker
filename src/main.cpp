@@ -1,5 +1,28 @@
-// PRUEBA DE CAMBIO DE RAMAS
-
+// ============================================================================
+// GPS Tracker Logan - firmware principal (env: tracker)
+//
+// Telemetria GNSS por LTE hacia MQTT + sense de ignicion por ADC en GPIO9.
+//
+// El estado de la ignicion gobierna la cadencia de publicacion:
+//   IGN_ON  en marcha  -> cada GPS_PERIOD_MS        (5 s)
+//   IGN_ON  en ralenti -> cada IDLE_PERIOD_MS       (30 s)
+//   IGN_OFF parqueado  -> cada PARKED_KEEPALIVE_MIN (20 min, configurable)
+//
+// Y ademas genera dos eventos discretos en las transiciones: engine_on y
+// engine_off. El de apagado se publica con la ultima posicion valida guardada
+// en RAM, de modo que el "aqui quedo parqueado" sale aunque el GNSS no tenga
+// fix fresco en ese instante.
+//
+// NIVEL 1 DE AHORRO DE ENERGIA: aqui no duerme nada (ni el ESP32, ni el modem,
+// ni el GNSS). Lo unico que baja es la cadencia de publicacion. Se eligio asi
+// porque con este stack (TinyGSM + PubSubClient + LTE) volver a despertar
+// cuesta 30-60 s de re-attach a plena potencia: pulso de PWRKEY, waitForNetwork,
+// gprsConnect, mqtt.connect y el TTFF del GNSS (sin A-GNSS, porque AT+CAGPS da
+// ERROR en el firmware B05V01_241206). Con intervalos cortos, dormir sale mas
+// caro que quedarse despierto. El apagado del GNSS, el sleep del modem y el
+// deep sleep del ESP32 (con wake por GPIO9, que es RTC-capable en el S3) quedan
+// para despues de la prueba de autonomia con la 18650.
+// ============================================================================
 
 #include <Arduino.h>
 #include <esp_task_wdt.h>
@@ -31,8 +54,24 @@
 
 #define MODEM_POWERON_PULSE_WIDTH_MS 1000
 
+// Sense de ignicion: divisor 47k/68k sobre VBUS post-buck, con 510 ohm en
+// serie, 100 nF en paralelo a R2 y Zener 3.6 V de clamp (catodo al pin).
+// GPIO9 = ADC1_CH8. Se uso ADC1 a proposito: ADC2 queda inutilizable cuando
+// la radio esta activa. GPIO1 quedo descartado por el pull-down parasitario
+// del riel de la camara.
+#define SENSE_PIN   9
+
+// Bateria 18650 leida por el divisor que ya trae la placa. GPIO8 = ADC1_CH7,
+// misma unidad de ADC que el sense, sin conflicto: se leen en secuencia.
+#define BAT_ADC_PIN 8
+
 // Prueba TCP previa a MQTT (solo para depuracion manual)
 #define DEBUG_TCP_PROBE 0
+
+// Puesto en 0, el firmware se comporta como antes de la integracion: cadencia
+// fija de 5 s e ignition=1 siempre. Sirve para descartar al sense como causa
+// de un problema en campo sin tener que revertir el commit.
+#define IGNITION_SENSE_ENABLED 1
 
 HardwareSerial SerialAT(1);
 TinyGsm modem(SerialAT);
@@ -48,6 +87,15 @@ const char TOPIC_TELEMETRY[] = "tracker/Lilygo/telemetria";
 const char TOPIC_LWT[]    = "tracker/Lilygo/sys/lwt";
 const char TOPIC_STATUS[] = "tracker/Lilygo/sys/status";
 
+// Estado de ignicion retenido, mismo contrato que usaban los firmwares de
+// prueba adc_sense_wifi / adc_sense_field, para no romper lo que ya escuche n8n.
+const char TOPIC_IGNITION[] = "tracker/Lilygo/event/ignition";
+
+// Voltaje de la 18650. Va en topic aparte y no dentro del CSV para no tocar el
+// pipeline de Traccar. Cuando formalicemos el CSV v3 se podra mandar en la
+// trama y mapearlo al parametro batt= del protocolo OsmAnd.
+const char TOPIC_BATTERY[] = "tracker/Lilygo/sys/battery";
+
 const char LWT_ONLINE[]  = "online";
 const char LWT_OFFLINE[] = "offline";
 
@@ -55,8 +103,47 @@ const char LWT_OFFLINE[] = "offline";
 TinyGsmClient netClient(modem);
 PubSubClient mqtt(netClient);
 
+// ---------- Contrato CSV ----------
+// Formato publicado (12 campos):
+//   v2,device,fix,lat,lon,speed,alt,vsat,acc,ignition,event,ts
+//
+// server/subscriberJsonOsmAnd.py ya lo parsea en normalize_v2_legacy_event(),
+// asi que este cambio NO requiere tocar el servidor.
+//
+// OJO: en esta variante el campo "quality" no viaja. No se pierde informacion:
+// el subscriber lo recalcula con build_quality() usando exactamente el mismo
+// criterio que el firmware (campo vacio = invalido), asi que el resultado es
+// identico al que se transmitia antes.
+//
+// Efecto util del lado del servidor: cuando ignition=0 o event != "-", el
+// subscriber marca la trama como evento y salta el rate-limit, el filtro de
+// movimiento minimo y el descarte por fix bajo. Por eso los keepalive de
+// parqueo y el punto de apagado siempre llegan a Traccar.
+const char EVENT_NONE[]       = "-";
+const char EVENT_ENGINE_ON[]  = "engine_on";
+const char EVENT_ENGINE_OFF[] = "engine_off";
+
 // ---------- Timing ----------
-static const uint32_t GPS_PERIOD_MS = 5000;  // Acá definimos la latencía de envío de los datos
+static const uint32_t GPS_PERIOD_MS = 5000;   // ignicion ON y en movimiento
+static const uint32_t IDLE_PERIOD_MS = 30000; // ignicion ON pero detenido
+
+// Keepalive de parqueo. CONFIGURABLE: este es el numero a mover durante la
+// prueba de autonomia con la 18650. 20 min = ~72 mensajes/dia.
+static const uint32_t PARKED_KEEPALIVE_MIN = 20;
+
+// Umbral para considerar que el vehiculo se esta moviendo.
+// PENDIENTE: depende de la unidad real de AT+CGNSSINFO (ver nota de validacion
+// GNSS mas abajo). A valores tan bajos da igual nudos que km/h, pero si algun
+// dia se sube este umbral hay que resolver primero la unidad.
+static const float MOVING_SPEED_KMH = 3.0f;
+
+// Cuanto se sigue considerando "en marcha" despues del ultimo movimiento, para
+// no saltar a cadencia lenta en cada semaforo.
+static const uint32_t MOVING_HOLD_MS = 60000;
+
+// Publicacion del voltaje de bateria con ignicion encendida. Con el vehiculo
+// parqueado se publica junto al keepalive, no cada 5 min.
+static const uint32_t BATTERY_PERIOD_MS = 300000;
 
 // Keepalive amplio: LTE tiene microcortes y cambios de celda.
 // Con 60 s el broker tolera latencia sin cortar la sesión.
@@ -75,6 +162,48 @@ static const uint8_t MQTT_FAILS_BEFORE_ESP_RESTART   = 10;
 // Watchdog: si el firmware se cuelga, el ESP32 se reinicia solo.
 static const uint32_t WDT_TIMEOUT_SEC = 120;
 
+// ---------- Sense de ignicion ----------
+//
+// CALIBRACION DEL DIVISOR (2026-08-17). Medido en banco con el buck alimentado
+// desde el vehiculo:
+//   salida del buck (multimetro) : 5.25 V
+//   pin GPIO9 (multimetro)       : 2.74 V
+//   pin GPIO9 (ADC del ESP32)    : 2.711 V  -> error de 27 mV (1.0 %), OK
+//
+// La relacion real del divisor es 2.74/5.25 = 0.5219, contra 0.5913 teorico de
+// 47k/68k: una desviacion de -11.7 %. La causa mas probable es la fuga inversa
+// del Zener 3.6 V, equivalente a unos 210 kOhm / 13 uA en paralelo con R2 sobre
+// un divisor que solo trabaja con 40 uA.
+//
+// Por eso el factor NO es el teorico 1.6912 sino el empirico 5.25/2.711.
+// Limitacion aceptada: al depender de una fuga, el VBUS reportado puede derivar
+// con la temperatura. Los umbrales ON/OFF no se ven afectados porque estan
+// definidos sobre el pin, no sobre VBUS.
+//
+// Pendiente de hardware (tarea aparte): bajar el divisor a 10k/12k y ajustar el
+// pot del MP1584 de 5.25 V a 5.05-5.10 V. Ahi habra que recalibrar este factor
+// y bajar el umbral ON a 2.2 V.
+static const float DIVIDER_FACTOR = 1.9366f;
+
+static const uint8_t  ADC_SAMPLES     = 32;
+static const uint8_t  BAT_SAMPLES     = 16;
+static const float    PIN_ON_V        = 2.5f;   // ~4.83 V de VBUS
+static const float    PIN_OFF_V       = 0.6f;   // residual medido: 0.018-0.04 V
+static const uint32_t ON_DEBOUNCE_MS  = 3000;
+static const uint32_t OFF_DEBOUNCE_MS = 20000;  // absorbe la caida del crank
+static const uint32_t IGN_SAMPLE_MS   = 250;
+
+// Si el pin se queda en tierra de nadie (entre OFF y ON) mas de este tiempo,
+// algo pasa con el divisor: soldadura fria, cable suelto, Zener en corto.
+static const uint32_t IGN_MIDZONE_WARN_MS = 120000;
+
+// Factor del divisor de bateria de la placa (teorico 2.0 para 100k/100k).
+// TODO CALIBRAR: medir con multimetro en los bornes de la 18650 y ajustar,
+// exactamente como hubo que hacerlo con el divisor de ignicion, donde el
+// teorico 1.6912 resulto ser 1.9366 en la vida real. Mientras no se calibre,
+// este voltaje sirve para ver tendencia, no para disparar alertas finas.
+static const float BAT_DIVIDER_FACTOR = 2.0f;
+
 // ---------- Validación GNSS ----------
 // PENDIENTE: verificar la unidad real que entrega AT+CGNSSINFO. La evidencia
 // de campo (Traccar coincide con el odómetro del vehículo) apunta a que el
@@ -85,14 +214,11 @@ static const float MIN_VALID_ALTITUDE_M = -9990.0f;
 static const int MIN_VALID_SATELLITES = 5;
 static const float MAX_VALID_HDOP = 2.5f;
 
-// Bitmask de calidad para CSV v2:
+// Bitmask de calidad heredado del CSV v2 de 11 campos. Se conserva porque el
+// firmware sigue usando el mismo criterio para decidir si un campo viaja vacio,
+// aunque el valor ya no se transmita (lo recalcula el subscriber).
 // bit 0 = altitud válida
 // bit 1 = velocidad válida
-// Valores posibles:
-// 0 = altitud inválida + velocidad inválida
-// 1 = altitud válida + velocidad inválida
-// 2 = altitud inválida + velocidad válida
-// 3 = altitud válida + velocidad válida
 static const uint8_t GPS_QUALITY_ALT_VALID = 1;
 static const uint8_t GPS_QUALITY_SPEED_VALID = 2;
 
@@ -101,6 +227,45 @@ static uint8_t mqttFailCount = 0;
 static uint32_t mqttNextAttemptMs = 0;
 static uint32_t mqttRetryDelayMs = MQTT_RETRY_BASE_MS;
 static bool bootStatusPublished = false;
+
+// ---------- Estado de ignicion ----------
+// IGN_UNKNOWN es el estado de arranque y tambien el de la zona media. Se trata
+// como encendido a efectos de cadencia (fail-safe: es preferible publicar de
+// mas que perderle el rastro al carro por un sense que no resolvio).
+enum IgnState : uint8_t { IGN_UNKNOWN = 0, IGN_ON = 1, IGN_OFF = 2 };
+
+static IgnState ignState = IGN_UNKNOWN;
+static IgnState ignCandidate = IGN_UNKNOWN;
+static uint32_t ignCandidateSinceMs = 0;
+static uint32_t ignLastSampleMs = 0;
+static float ignLastPinV = 0.0f;
+static uint32_t midzoneSinceMs = 0;
+static bool midzoneWarned = false;
+
+enum PendingEvent : uint8_t { EV_NONE = 0, EV_ENGINE_ON = 1, EV_ENGINE_OFF = 2 };
+static PendingEvent pendingEvent = EV_NONE;
+
+// ---------- Ultimo punto valido ----------
+// Se cachea en RAM para poder publicar el evento de apagado y los keepalive de
+// parqueo sin depender de que el GNSS tenga fix fresco en ese momento.
+struct GpsPoint {
+  bool valid;
+  uint8_t fix;
+  float lat;
+  float lon;
+  float speed;
+  float alt;
+  float acc;
+  int vsat;
+  bool speedValid;
+  bool altValid;
+  char ts[24];
+};
+
+static GpsPoint lastValidPoint = {};
+static uint32_t lastMovementMs = 0;
+static uint32_t lastPublishMs = 0;
+static uint32_t lastBatteryMs = 0;
 
 static bool isGpsPositionValid(uint8_t fix, float lat, float lon, int satellites, float hdop) {
   bool hasFix = fix >= 2;  // 2D/3D fix
@@ -168,6 +333,116 @@ static void publishStatus(const char *state) {
   // para que el último estado quede siempre disponible en el broker.
   mqtt.publish(TOPIC_STATUS, state, true);
   SerialMon.printf("[SYS] status=%s\n", state);
+}
+
+// ---------- ADC ----------
+static void adcSetup() {
+  analogReadResolution(12);
+  // 11 dB para cubrir el rango util del divisor (0-3.1 V aprox).
+  analogSetPinAttenuation(SENSE_PIN, ADC_11db);
+  analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
+}
+
+static float readPinVolts() {
+  uint32_t acc_mv = 0;
+  for (uint8_t i = 0; i < ADC_SAMPLES; i++) {
+    acc_mv += analogReadMilliVolts(SENSE_PIN);
+  }
+  return (acc_mv / (float)ADC_SAMPLES) / 1000.0f;
+}
+
+static float readBatteryVolts() {
+  uint32_t acc_mv = 0;
+  for (uint8_t i = 0; i < BAT_SAMPLES; i++) {
+    acc_mv += analogReadMilliVolts(BAT_ADC_PIN);
+  }
+  return ((acc_mv / (float)BAT_SAMPLES) / 1000.0f) * BAT_DIVIDER_FACTOR;
+}
+
+static bool isIgnitionOff() {
+#if IGNITION_SENSE_ENABLED
+  return ignState == IGN_OFF;
+#else
+  return false;
+#endif
+}
+
+static uint8_t ignitionField() {
+  return isIgnitionOff() ? 0 : 1;
+}
+
+// Muestrea el pin y resuelve el estado con antirrebote.
+//
+// El antirrebote se mide con deltas de millis(), NO contando muestras. Eso
+// importa porque el loop se bloquea de a ratos en llamadas AT y de red
+// (waitForNetwork puede tardar 60 s). Un bloqueo solo retrasa la deteccion,
+// no la rompe: al volver, la funcion ve el pin y el tiempo transcurrido.
+static void serviceIgnition() {
+#if IGNITION_SENSE_ENABLED
+  uint32_t now = millis();
+  if (now - ignLastSampleMs < IGN_SAMPLE_MS) {
+    return;
+  }
+  ignLastSampleMs = now;
+
+  float pinV = readPinVolts();
+  ignLastPinV = pinV;
+
+  IgnState observed;
+  if (pinV >= PIN_ON_V) {
+    observed = IGN_ON;
+  } else if (pinV <= PIN_OFF_V) {
+    observed = IGN_OFF;
+  } else {
+    observed = IGN_UNKNOWN;  // zona media
+  }
+
+  if (observed == IGN_UNKNOWN) {
+    if (midzoneSinceMs == 0) {
+      midzoneSinceMs = now;
+    } else if (!midzoneWarned && (now - midzoneSinceMs) >= IGN_MIDZONE_WARN_MS) {
+      SerialMon.printf("[IGN] zona media sostenida pin=%.3fV -> revisar divisor\n", pinV);
+      publishStatus("ign_sense_midzone");
+      midzoneWarned = true;
+    }
+    return;  // conserva el ultimo estado conocido
+  }
+
+  midzoneSinceMs = 0;
+  midzoneWarned = false;
+
+  if (observed != ignCandidate) {
+    ignCandidate = observed;
+    ignCandidateSinceMs = now;
+    return;
+  }
+
+  if (observed == ignState) {
+    return;
+  }
+
+  uint32_t needed = (observed == IGN_ON) ? ON_DEBOUNCE_MS : OFF_DEBOUNCE_MS;
+  if ((now - ignCandidateSinceMs) < needed) {
+    return;
+  }
+
+  ignState = observed;
+  pendingEvent = (ignState == IGN_ON) ? EV_ENGINE_ON : EV_ENGINE_OFF;
+  SerialMon.printf("[IGN] %s pin=%.3fV vbus=%.2fV\n",
+                   (ignState == IGN_ON) ? "ON" : "OFF", pinV, pinV * DIVIDER_FACTOR);
+#endif
+}
+
+// Periodo de publicacion segun el estado actual.
+static uint32_t currentPeriodMs() {
+  if (isIgnitionOff()) {
+    return PARKED_KEEPALIVE_MIN * 60000UL;
+  }
+  // Si nunca se ha detectado movimiento (recien arranco) se asume en marcha.
+  if (lastMovementMs != 0 && (millis() - lastMovementMs) > MOVING_HOLD_MS) {
+    return IDLE_PERIOD_MS;
+  }
+  return GPS_PERIOD_MS;
 }
 
 static void modemPowerOn() {
@@ -255,6 +530,10 @@ static bool tryConnectMQTT() {
 
   // Last Will Testament: si el dispositivo desaparece sin cerrar sesión,
   // el broker publica "offline" retenido en TOPIC_LWT.
+  //
+  // El LWT NO se mapea a ignition=false en el subscriber (modo "event"):
+  // una caida de LTE no significa que el motor se apago. El estado real de
+  // ignicion es el que publica este firmware desde el ADC.
   bool ok = mqtt.connect(
       clientId.c_str(),
       MQTT_USER,
@@ -272,6 +551,15 @@ static bool tryConnectMQTT() {
     // sesión, y no después en setup(), donde sobrescribiría el estado real.
     publishStatus(bootStatusPublished ? "mqtt_reconnected" : "boot");
     bootStatusPublished = true;
+
+#if IGNITION_SENSE_ENABLED
+    // Reafirma el estado de ignicion al reconectar, por si el retained del
+    // broker quedo viejo tras una caida larga.
+    if (ignState != IGN_UNKNOWN) {
+      mqtt.publish(TOPIC_IGNITION, (ignState == IGN_ON) ? "on" : "off", true);
+    }
+#endif
+
     mqttFailCount = 0;
     mqttRetryDelayMs = MQTT_RETRY_BASE_MS;
     return true;
@@ -320,11 +608,185 @@ static void serviceMQTT() {
   mqttNextAttemptMs = millis() + mqttRetryDelayMs;
 }
 
+// ---------- Telemetria ----------
+// Lee el GNSS y, si el punto es valido, lo deja en out. Es bloqueante (AT+CGNSSINFO
+// tarda tipicamente 50-300 ms), por eso solo se llama en los instantes de
+// publicacion y no en cada vuelta del loop.
+static bool readGpsPoint(GpsPoint &out) {
+  float lat = 0, lon = 0, speed = 0, alt = 0, acc = 0;
+  int vsat = 0, usat = 0;
+  int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0;
+  uint8_t fix = 0;
+
+  bool ok = modem.getGPS(&fix, &lat, &lon, &speed, &alt, &vsat, &usat, &acc,
+                         &year, &month, &day, &hour, &min, &sec);
+
+  if (!ok) {
+    SerialMon.println("[GPS] read FAIL");
+    return false;
+  }
+
+  if (!isGpsPositionValid(fix, lat, lon, vsat, acc)) {
+    SerialMon.printf("[GPS] posición inválida fix=%u lat=%.6f lon=%.6f speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
+                     fix, lat, lon, speed, alt, vsat, acc);
+    return false;
+  }
+
+  uint8_t quality = buildGpsQuality(speed, alt);
+
+  out.valid = true;
+  out.fix = fix;
+  out.lat = lat;
+  out.lon = lon;
+  out.speed = speed;
+  out.alt = alt;
+  out.acc = acc;
+  out.vsat = vsat;
+  out.speedValid = (quality & GPS_QUALITY_SPEED_VALID) != 0;
+  out.altValid = (quality & GPS_QUALITY_ALT_VALID) != 0;
+  snprintf(out.ts, sizeof(out.ts), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+           year, month, day, hour, min, sec);
+
+  if (!out.speedValid || !out.altValid) {
+    SerialMon.printf("[GPS] posición válida con datos parciales quality=%u speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
+                     quality, speed, alt, vsat, acc);
+  }
+
+  return true;
+}
+
+// Actualiza la cache y la marca de movimiento con un punto fresco.
+static void rememberPoint(const GpsPoint &p) {
+  lastValidPoint = p;
+  if (p.speedValid && p.speed > MOVING_SPEED_KMH) {
+    lastMovementMs = millis();
+  }
+}
+
+static bool publishPoint(const GpsPoint &p, const char *event) {
+  if (!mqtt.connected()) {
+    SerialMon.println("[PUB] omitido: MQTT desconectado");
+    return false;
+  }
+  if (!p.valid) {
+    SerialMon.println("[PUB] omitido: aún no hay posición válida en caché");
+    return false;
+  }
+
+  char speedField[16] = "";
+  char altField[16] = "";
+
+  if (p.speedValid) {
+    snprintf(speedField, sizeof(speedField), "%.2f", p.speed);
+  }
+  if (p.altValid) {
+    snprintf(altField, sizeof(altField), "%.1f", p.alt);
+  }
+
+  char payload[256];
+  snprintf(payload, sizeof(payload),
+           "v2,%s,%u,%.6f,%.6f,%s,%s,%d,%.2f,%u,%s,%s",
+           DEVICE_ID, p.fix, p.lat, p.lon, speedField, altField, p.vsat, p.acc,
+           ignitionField(), event, p.ts);
+
+  // Telemetría GPS en QoS 0: alto volumen, perder un punto no es crítico.
+  bool pubOk = mqtt.publish(TOPIC_TELEMETRY, payload);
+  SerialMon.printf("[PUB] %s topic=%s payload=%s\n", pubOk ? "OK" : "FAIL", TOPIC_TELEMETRY, payload);
+  return pubOk;
+}
+
+// Publica los eventos de transicion apenas haya enlace. Si MQTT esta caido, el
+// evento queda pendiente y sale en cuanto vuelva: no se pierde el apagado.
+static void serviceEvents() {
+  if (pendingEvent == EV_NONE) {
+    return;
+  }
+  if (!mqtt.connected()) {
+    return;
+  }
+
+  bool isOn = (pendingEvent == EV_ENGINE_ON);
+  const char *eventName = isOn ? EVENT_ENGINE_ON : EVENT_ENGINE_OFF;
+
+  // Estado retenido para n8n y depuracion.
+  mqtt.publish(TOPIC_IGNITION, isOn ? "on" : "off", true);
+
+  // Al encender vale la pena intentar un punto fresco. Al apagar tambien se
+  // intenta, pero si el GNSS no responde se publica la ultima posicion valida:
+  // ese es justamente el "aqui quedo parqueado".
+  GpsPoint fresh = {};
+  if (readGpsPoint(fresh)) {
+    rememberPoint(fresh);
+  }
+
+  publishPoint(lastValidPoint, eventName);
+  lastPublishMs = millis();
+  pendingEvent = EV_NONE;
+}
+
+static void serviceTelemetry() {
+  uint32_t now = millis();
+  if ((now - lastPublishMs) < currentPeriodMs()) {
+    return;
+  }
+  lastPublishMs = now;
+
+  GpsPoint fresh = {};
+  bool haveFresh = readGpsPoint(fresh);
+  if (haveFresh) {
+    rememberPoint(fresh);
+  }
+
+  if (haveFresh) {
+    publishPoint(lastValidPoint, EVENT_NONE);
+    return;
+  }
+
+  // Sin fix fresco: con el motor encendido no se publica (igual que antes,
+  // se reintenta en el siguiente ciclo). Pero el keepalive de parqueo si sale
+  // con la ultima posicion conocida, porque su funcion es avisar "sigo aqui".
+  if (isIgnitionOff()) {
+    publishPoint(lastValidPoint, EVENT_NONE);
+  }
+}
+
+static void serviceBattery() {
+  // Parqueado, la bateria viaja al ritmo del keepalive y no cada 5 min.
+  uint32_t period = isIgnitionOff() ? (PARKED_KEEPALIVE_MIN * 60000UL) : BATTERY_PERIOD_MS;
+
+  uint32_t now = millis();
+  if ((now - lastBatteryMs) < period) {
+    return;
+  }
+  lastBatteryMs = now;
+
+  if (!mqtt.connected()) {
+    return;
+  }
+
+  float volts = readBatteryVolts();
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%.2f", volts);
+  mqtt.publish(TOPIC_BATTERY, buf, true);
+  SerialMon.printf("[BAT] %s V (factor %.2f SIN CALIBRAR)\n", buf, BAT_DIVIDER_FACTOR);
+}
+
 void setup() {
   SerialMon.begin(115200);
   delay(200);
 
   watchdogSetup();
+
+  adcSetup();
+
+  // Lectura informativa de arranque. El estado real se resuelve en el loop con
+  // su antirrebote: hasta entonces IGN_UNKNOWN se comporta como encendido.
+  float bootPinV = readPinVolts();
+  SerialMon.printf("[IGN] boot pin=%.3fV vbus=%.2fV (sense %s)\n",
+                   bootPinV, bootPinV * DIVIDER_FACTOR,
+                   IGNITION_SENSE_ENABLED ? "activo" : "desactivado");
+  SerialMon.printf("[BAT] boot %.2fV (factor %.2f SIN CALIBRAR)\n",
+                   readBatteryVolts(), BAT_DIVIDER_FACTOR);
 
   modemPowerOn();
   SerialAT.begin(MODEM_BAUDRATE, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
@@ -364,6 +826,14 @@ void setup() {
 void loop() {
   watchdogFeed();
 
+  // El sense va de primero y en cada vuelta. El loop gira cada ~10 ms, asi que
+  // la cadencia efectiva del ADC es mejor que IGN_SAMPLE_MS salvo cuando una
+  // llamada bloqueante (waitForNetwork, mqtt.connect, getGPS) se toma el hilo.
+  // No hace falta un segundo nucleo: 32 muestras cada 250 ms son microsegundos
+  // de CPU, y repartir esto entre cores obligaria a sincronizar el estado con
+  // el cliente MQTT, que no es thread-safe.
+  serviceIgnition();
+
   // Mantener sesión MQTT viva
   if (!modem.isNetworkConnected() || !modem.isGprsConnected()) {
     SerialMon.println("[NET] down -> reconnect");
@@ -373,64 +843,9 @@ void loop() {
   serviceMQTT();
   mqtt.loop();
 
-  static uint32_t last = 0;
-  if (millis() - last >= GPS_PERIOD_MS) {
-    last = millis();
-
-    float lat=0, lon=0, speed=0, alt=0, acc=0;
-    int vsat=0, usat=0;
-    int year=0, month=0, day=0, hour=0, min=0, sec=0;
-    uint8_t fix=0;
-
-    bool ok = modem.getGPS(&fix, &lat, &lon, &speed, &alt, &vsat, &usat, &acc,
-                           &year, &month, &day, &hour, &min, &sec);
-
-    if (!ok) {
-      SerialMon.println("[GPS] read FAIL");
-      return;
-    }
-
-    bool positionValid = isGpsPositionValid(fix, lat, lon, vsat, acc);
-    if (!positionValid) {
-      SerialMon.printf("[GPS] posición inválida -> no se publica fix=%u lat=%.6f lon=%.6f speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
-                       fix, lat, lon, speed, alt, vsat, acc);
-      return;
-    }
-
-    uint8_t quality = buildGpsQuality(speed, alt);
-    bool speedValid = (quality & GPS_QUALITY_SPEED_VALID) != 0;
-    bool altValid = (quality & GPS_QUALITY_ALT_VALID) != 0;
-
-    char speedField[16] = "";
-    char altField[16] = "";
-
-    if (speedValid) {
-      snprintf(speedField, sizeof(speedField), "%.2f", speed);
-    }
-    if (altValid) {
-      snprintf(altField, sizeof(altField), "%.1f", alt);
-    }
-
-    if (!speedValid || !altValid) {
-      SerialMon.printf("[GPS] posición válida con datos parciales quality=%u speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
-                       quality, speed, alt, vsat, acc);
-    }
-
-    char payload[256];
-    snprintf(payload, sizeof(payload),
-             "v2,%s,%u,%.6f,%.6f,%s,%s,%d,%.2f,%u,%04d-%02d-%02dT%02d:%02d:%02dZ",
-             DEVICE_ID, fix, lat, lon, speedField, altField, vsat, acc, quality,
-             year, month, day, hour, min, sec);
-
-    if (!mqtt.connected()) {
-      SerialMon.println("[PUB] omitido: MQTT desconectado");
-      return;
-    }
-
-    // Telemetría GPS en QoS 0: alto volumen, perder un punto no es crítico.
-    bool pubOk = mqtt.publish(TOPIC_TELEMETRY, payload);
-    SerialMon.printf("[PUB] %s topic=%s payload=%s\n", pubOk ? "OK" : "FAIL", TOPIC_TELEMETRY, payload);
-  }
+  serviceEvents();
+  serviceTelemetry();
+  serviceBattery();
 
   delay(10);
 }
