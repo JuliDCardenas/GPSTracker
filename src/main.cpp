@@ -59,6 +59,11 @@
 // normal se ven EXACTAMENTE igual, y se depura a ciegas adivinando. Todo estado
 // que dure mas de unos segundos tiene que anunciarse. Ver el log periodico del
 // loop y TEST_DISABLE_SLEEP.
+//
+// TERCERA REGLA (la que costo toda la noche): ninguna decision irreversible se
+// toma con una sola muestra del ADC. Las primeras conversiones tras el arranque
+// son basura y casi dejaron esta rama por inservible. Ver adcSetup() y
+// pmBootGuard().
 // ============================================================================
 
 #include <Arduino.h>
@@ -247,6 +252,12 @@ static const uint32_t ON_DEBOUNCE_MS  = 3000;
 static const uint32_t OFF_DEBOUNCE_MS = 20000;  // absorbe la caida del crank
 static const uint32_t IGN_SAMPLE_MS   = 250;
 
+// Conversiones que se descartan en adcSetup() antes de dar el ADC por usable,
+// y pausa entre ellas. Ver el comentario largo de adcSetup(): sin esto, las
+// primeras lecturas son basura y el guardian de arranque decide sobre ruido.
+static const uint8_t  ADC_WARMUP_READS  = 8;
+static const uint32_t ADC_WARMUP_STEP_MS = 5;
+
 // Si el pin se queda en tierra de nadie (entre OFF y ON) mas de este tiempo,
 // algo pasa con el divisor: soldadura fria, cable suelto, Zener en corto.
 static const uint32_t IGN_MIDZONE_WARN_MS = 120000;
@@ -280,11 +291,9 @@ static const float BAT_DIVIDER_FACTOR = 2.0f;
 // Piso de PLAUSIBILIDAD, que no es lo mismo que un umbral de corte.
 //
 // Por debajo de esto la lectura no describe una celda descargada: describe una
-// celda que no se puede medir (sin 18650 puesta, divisor sin alimentar, placa
-// corriendo solo de USB). Tratar 0.00 V como "celda agotada" hacia que el
-// guardian durmiera el equipo una hora ANTES de que el puerto USB CDC
-// enumerara, o sea de forma completamente invisible: monitor en blanco y
-// aparentemente un ladrillo.
+// celda que no se puede medir, o un ADC que todavia no se ha asentado. El
+// 2026-08-20 esta guarda fue lo unico que impidio que el equipo se durmiera una
+// hora con la celda a 4.19 V, porque la primera lectura del boot dijo 0.84 V.
 //
 // El limite va en 2.0 V a proposito: los 2.37 V de la muerte del 2026-08-18
 // quedan por encima y siguen siendo detectados como lo que son, una celda
@@ -512,13 +521,6 @@ static void publishStatus(const char *state) {
 }
 
 // ---------- ADC ----------
-static void adcSetup() {
-  analogReadResolution(12);
-  // 11 dB para cubrir el rango util del divisor (0-3.1 V aprox).
-  analogSetPinAttenuation(SENSE_PIN, ADC_11db);
-  analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
-}
-
 static float readPinVolts() {
   uint32_t acc_mv = 0;
   for (uint8_t i = 0; i < ADC_SAMPLES; i++) {
@@ -533,6 +535,41 @@ static float readBatteryVolts() {
     acc_mv += analogReadMilliVolts(BAT_ADC_PIN);
   }
   return ((acc_mv / (float)BAT_SAMPLES) / 1000.0f) * BAT_DIVIDER_FACTOR;
+}
+
+// CAUSA RAIZ del bug que se persiguio toda la sesion del 2026-08-20.
+//
+// Las primeras conversiones despues de configurar la unidad de ADC son basura.
+// Evidencia directa del banco, con el log ya completo:
+//
+//   [PM] boot#1 wake=0 bat=0.84 vbus=0 ...      <- lectura del guardian
+//   [IGN] boot pin=2.700V vbus=5.23V            <- milisegundos despues
+//   [BAT] boot 3.68V                            <- y la celda estaba en 4.19 V
+//
+// Los mismos pines, la misma unidad de ADC, un instante de diferencia: el
+// guardian vio 0.84 V de celda y VBUS ausente cuando habia 4.19 V y 5.23 V.
+// analogSetPinAttenuation() reconfigura el ADC y las primeras muestras salen
+// antes de que la calibracion interna y el sample-and-hold se asienten;
+// adcSetup() volvia de inmediato y pmBootGuard() leia acto seguido.
+//
+// Con el codigo original de la rama, la cuenta del guardian era:
+//   !vbus && v < recoverV()  ->  !false && 0.84 < 3.80  ->  DORMIR
+// o sea que el equipo se dormia en el arranque con la celda llena. Ese era el
+// "pasa a deepsleep desde el inicio", y no tenia nada que ver con los umbrales.
+//
+// Por eso aqui se descartan conversiones a proposito antes de dar el ADC por
+// bueno. Cuesta 40 ms una sola vez por arranque.
+static void adcSetup() {
+  analogReadResolution(12);
+  // 11 dB para cubrir el rango util del divisor (0-3.1 V aprox).
+  analogSetPinAttenuation(SENSE_PIN, ADC_11db);
+  analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
+
+  for (uint8_t i = 0; i < ADC_WARMUP_READS; i++) {
+    (void)analogReadMilliVolts(SENSE_PIN);
+    (void)analogReadMilliVolts(BAT_ADC_PIN);
+    delay(ADC_WARMUP_STEP_MS);
+  }
 }
 
 // La lectura describe una celda de verdad, o el divisor no esta dando nada?
@@ -708,6 +745,13 @@ static void restartModem() {
 
 // Intento único de conexión MQTT. No bloquea el loop.
 // Devuelve true si quedó conectado.
+//
+// DEFECTO CONOCIDO, ajeno a esta rama: el PRIMER intento tras encender el modem
+// falla de forma reproducible con state=-4 y un "### Closed: 0" de TinyGSM, y el
+// segundo conecta sin problema (banco 2026-08-20). Es el socket zombi que ya
+// esta registrado como tarea aparte. El backoff lo absorbe, pero cuesta unos
+// segundos en cada arranque y en cada pulso de parqueo, asi que vale la pena
+// resolverlo: en el Nivel 2 ese reintento se paga con bateria.
 static bool tryConnectMQTT() {
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setKeepAlive(MQTT_KEEPALIVE_SEC);
@@ -1146,8 +1190,10 @@ static bool pmGnssOn() {
 }
 
 // ---------------- Guardian de arranque ----------------
-// Se llama DESPUES de adcSetup(): sin la atenuacion configurada, la lectura de
-// bateria sale mal y el guardian decidiria sobre un numero inventado.
+// Se llama DESPUES de adcSetup(): sin la atenuacion configurada Y sin el
+// calentamiento del ADC, la lectura de bateria sale mal y el guardian decidiria
+// sobre un numero inventado. Eso no es teorico: paso en banco el 2026-08-20 y
+// era la causa raiz del bug de esta rama. Ver el comentario de adcSetup().
 //
 // DEFECTO CORREGIDO (2026-08-20): el guardian usaba el umbral de REARRANQUE
 // (3.80 V) como piso de arranque, sin histeresis. Una celda perfectamente sana
@@ -1158,11 +1204,6 @@ static bool pmGnssOn() {
 // se exige el rearranque (3.80 V) cuando venimos de un corte real, que es lo
 // que rtcInCutoff recuerda a traves del deep sleep. Y se duerme con repaso
 // horario, para poder notar la recuperacion en vez de esperar la ignicion.
-//
-// SEGUNDO ARREGLO (mismo dia): una lectura implausible ya no bloquea. Sin
-// 18650 puesta el ADC devuelve ~0.00 V, y 0.00 <= 3.50 dormia el equipo una
-// hora antes de que el USB CDC enumerara. Desde afuera: monitor en blanco,
-// mosquitto en blanco, placa aparentemente muerta.
 static void pmBootGuard() {
   rtcBootCount++;
 
@@ -1172,6 +1213,21 @@ static void pmBootGuard() {
   SerialMon.printf("[PM] boot#%lu wake=%d bat=%.2f vbus=%d corte=%.2f rearranque=%.2f corte_previo=%d\n",
                    (unsigned long)rtcBootCount, (int)esp_sleep_get_wakeup_cause(),
                    v, (int)vbus, cutoffV(), recoverV(), (int)rtcInCutoff);
+
+  // SEGUNDA OPINION antes de tomar una decision irreversible.
+  //
+  // Dormir una hora sin encender el modem es lo mas grave que hace este
+  // firmware, y no se toma con una sola muestra. Si la primera lectura es
+  // implausible o dice que no hay VBUS, se vuelve a medir. Cuesta 100 ms y solo
+  // cuando algo se ve raro. El calentamiento de adcSetup() deberia hacer esto
+  // innecesario, pero es exactamente el tipo de fallo que ya nos costo una
+  // sesion completa: aqui se paga barato y se duerme tranquilo.
+  if (!vbus || !batteryReadingPlausible(v)) {
+    delay(100);
+    v    = readBatteryVolts();
+    vbus = pmVbusPresent();
+    SerialMon.printf("[PM] segunda lectura bat=%.2f vbus=%d\n", v, (int)vbus);
+  }
 
   if (!batteryReadingPlausible(v)) {
     SerialMon.printf("[PM] lectura de bateria implausible (%.2fV) -> no se bloquea el arranque\n", v);
@@ -1352,9 +1408,9 @@ void setup() {
   SerialMon.println("[PM] *** TEST_DISABLE_SLEEP=1: no se dormira nunca (modo banco) ***");
 #endif
 
-  // OBLIGATORIO antes de pmBootGuard(): sin la atenuacion del ADC configurada,
-  // la lectura de bateria sale mal y el guardian decidiria sobre un numero
-  // inventado.
+  // OBLIGATORIO antes de pmBootGuard(): configura la atenuacion Y calienta el
+  // ADC descartando las primeras conversiones. Sin esto el guardian decide
+  // sobre ruido y duerme el equipo con la celda llena (banco 2026-08-20).
   adcSetup();
 
   pmBootGuard();            // si la celda esta bajo el piso, duerme aqui mismo
@@ -1402,6 +1458,8 @@ void setup() {
 
   // 2) MQTT up (primer intento; el loop se encarga de reintentar).
   //    El status "boot" lo publica tryConnectMQTT() al conectar.
+  //    Ver la nota de tryConnectMQTT(): este primer intento falla de forma
+  //    reproducible con state=-4 y conecta en el reintento del loop.
   tryConnectMQTT();
 
   // 3) GPS on
