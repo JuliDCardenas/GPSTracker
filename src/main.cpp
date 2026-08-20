@@ -56,6 +56,14 @@
 // de CPU a plena potencia en cada repaso de 30 s, un 10 % de ciclo util), que
 // ya esta corregido. Ver el comentario de SERIAL_CDC_WAIT_MS.
 //
+// ENTREGADO A MQTT NO ES ENTREGADO A TRACCAR (leccion del 2026-08-20, por la
+// mañana): esos 5 pulsos si estaban en el broker, pero el subscriber los tiro
+// todos con "Skip: no_move_0.0m" y la noche entera quedo invisible en el mapa.
+// El CSV decia ignition=1 porque ignState no sobrevivia al deep sleep, y sin
+// ignition=0 no hay bypass del filtro de movimiento. Una prueba de campo no
+// termina en mosquitto_sub: termina en el log del contenedor. Ver ignState y
+// pmParkedTick().
+//
 // OJO CON EL RETRASO DE DETECCION: los 120 s del repaso NO son la latencia de
 // deteccion de la ignicion. El despertar real lo hace ext0, que es una
 // interrupcion de hardware en GPIO9 y es instantanea. El temporizador existe
@@ -83,6 +91,11 @@
 // paga con celda. Todo lo que se agregue al camino de arranque corre cientos de
 // veces al dia, asi que ninguna espera va antes de saber POR QUE despertamos.
 // La observabilidad se agrega para el arranque en frio, no para el repaso.
+//
+// QUINTA REGLA (media hora despues de la cuarta): todo estado del que dependa
+// una publicacion tiene que vivir en RTC_DATA_ATTR o recalcularse en el
+// despertar. Un deep sleep no es una pausa: es un reset con memoria selectiva,
+// y las variables normales vuelven a su valor inicial. Ver ignState.
 // ============================================================================
 
 #include <Arduino.h>
@@ -193,6 +206,11 @@ PubSubClient mqtt(netClient);
 // quieto, el servidor descarto cada trama con "Skip: no_move_0.2m"; parqueado,
 // tramas practicamente identicas pasaron las 25 veces gracias al bypass por
 // ignition=0. Sin ese bypass no habria quedado ni un punto de la noche.
+//
+// Y CONFIRMADO POR LA VIA DOLOROSA la noche del 19 al 20: los 5 pulsos de
+// parqueo salieron con ignition=1 (ignState no sobrevivia al sueño) y el
+// subscriber los tiro con "Skip: no_move_0.0m", los cinco. Cero puntos en
+// Traccar. Ese campo no es decorativo: es la unica llave del bypass.
 const char EVENT_NONE[]       = "-";
 const char EVENT_ENGINE_ON[]  = "engine_on";
 const char EVENT_ENGINE_OFF[] = "engine_off";
@@ -416,7 +434,27 @@ static RTC_DATA_ATTR bool bootStatusPublished = false;
 // mas que perderle el rastro al carro por un sense que no resolvio).
 enum IgnState : uint8_t { IGN_UNKNOWN = 0, IGN_ON = 1, IGN_OFF = 2 };
 
-static IgnState ignState = IGN_UNKNOWN;
+// RTC_DATA_ATTR (DEFECTO CORREGIDO 2026-08-20, encontrado en produccion).
+//
+// Sin esto, cada despertar del Nivel 2 arrancaba en IGN_UNKNOWN, que el
+// firmware trata como "encendido" por fail-safe. Ese fail-safe es correcto en
+// un arranque en frio y es EXACTAMENTE LO CONTRARIO de lo que se necesita en un
+// repaso de parqueo, donde la unica razon de estar despierto es que el carro
+// esta apagado. Consecuencia medida: los 5 pulsos de la noche del 19 al 20
+// publicaron ignition=1, el subscriber perdio el bypass, y los descarto con
+// "Skip: no_move_0.0m" porque la trama era identica a la anterior (misma
+// posicion cacheada, mismo timestamp). Cinco pulsos entregados a MQTT, cero
+// puntos en Traccar, la noche entera invisible en el mapa.
+//
+// Prueba por contraste del mismo log: el engine_off de las 01:34:24, con la
+// MISMA lat/lon que un "Skip: no_move_4.4m" de nueve segundos antes, paso sin
+// problema. El filtro no estaba roto; el firmware le estaba mintiendo.
+//
+// Guardarlo en RTC hace que el estado resuelto con antirrebote antes de
+// parquear (IGN_OFF) siga vigente en cada repaso, que es la verdad del mundo
+// fisico: el carro no se enciende solo mientras el ESP32 duerme, y si se
+// enciende, para eso esta ext0.
+static RTC_DATA_ATTR IgnState ignState = IGN_UNKNOWN;
 static IgnState ignCandidate = IGN_UNKNOWN;
 static uint32_t ignCandidateSinceMs = 0;
 static uint32_t ignLastSampleMs = 0;
@@ -629,6 +667,10 @@ static bool isIgnitionOff() {
 #endif
 }
 
+// Campo "ignition" del CSV. NO es solo informativo: en el subscriber,
+// ignition=0 (o un event != "-") es lo que hace que la trama salte el
+// rate-limit y el filtro de movimiento minimo. Si esto sale en 1 con el carro
+// parqueado, el punto no llega a Traccar. Ver el comentario de ignState.
 static uint8_t ignitionField() {
   return isIgnitionOff() ? 0 : 1;
 }
@@ -1379,6 +1421,16 @@ static void pmEnterParked() {
 }
 
 static void pmParkedTick() {
+  // Estamos aqui por un despertar de temporizador con el pin de ignicion bajo:
+  // por definicion, el carro esta apagado. Afirmarlo es cinturon y tirantes
+  // sobre el ignState que ya viaja en RTC, y cubre el caso en que la RTC memory
+  // se perdiera (reset de hardware con la placa parqueada, brownout).
+  //
+  // No es cosmetico: de este estado depende el campo ignition del CSV, y con
+  // ignition=1 el subscriber tira el pulso con "Skip: no_move". Los 5 pulsos
+  // de la noche del 19 al 20 se perdieron exactamente asi.
+  ignState = IGN_OFF;
+
   // El reloj de parqueo cuenta sueno NOMINAL mas tiempo REALMENTE despierto.
   //
   // DEFECTO CORREGIDO (2026-08-20): antes solo sumaba PARKED_POLL_S, ignorando
@@ -1427,7 +1479,8 @@ static void pmParkedTick() {
       // este es el momento de sacarlo: llega tarde, pero llega.
       serviceEvents();
       // El "sigo aqui" para Traccar: mismo contrato que el keepalive del
-      // Nivel 1. ignition=0 en el CSV hace que el subscriber lo deje pasar.
+      // Nivel 1. ignition=0 en el CSV hace que el subscriber lo deje pasar,
+      // y ese 0 sale de ignState, que ahora vive en RTC y se afirma arriba.
       publishPoint(lastValidPoint, EVENT_NONE);
       delay(SETTLE_MS);
       mqtt.loop();
@@ -1493,10 +1546,12 @@ void setup() {
   SerialAT.begin(MODEM_BAUDRATE, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
 
   // Despertar por temporizador sin ignicion = seguir parqueado.
-  // OJO: ignState no sobrevive al deep sleep (arranca en IGN_UNKNOWN), asi que
-  // la decision se toma del pin directamente; isIgnitionOff() solo esta en la
-  // condicion para cubrir el banco (TEST_FORCE_PARKED), donde el pin esta alto
-  // por el VBUS de la fuente.
+  //
+  // La decision se toma del PIN, no del estado: ignState ya viaja en RTC
+  // (arranca en IGN_OFF si venimos de un parqueo), pero un reset de hardware o
+  // un brownout la borran, y el mundo fisico -el pin- siempre es la fuente de
+  // verdad. isIgnitionOff() esta en la condicion para cubrir el banco
+  // (TEST_FORCE_PARKED), donde el pin esta alto por el VBUS de la fuente.
   //
   // El umbral es PIN_ON_V y no PIN_OFF_V a proposito: con el corte anterior, un
   // pin en zona media (0.6-2.5 V, divisor sucio o cap descargandose) disparaba
@@ -1509,6 +1564,14 @@ void setup() {
     pmParkedTick();         // NO retorna
   }
 #endif
+
+  // Despertamos con la ignicion arriba (ext0) o es un arranque en frio: el
+  // estado que quedo en RTC ya no describe el mundo. Se vuelve a IGN_UNKNOWN
+  // para que el antirrebote del loop lo resuelva desde cero y publique su
+  // engine_on cuando corresponda.
+  if (!coldBoot && wakeCause != ESP_SLEEP_WAKEUP_TIMER) {
+    ignState = IGN_UNKNOWN;
+  }
 
   // PWRKEY solo si el modem estaba apagado de verdad: pulsarlo con el modem
   // encendido lo APAGA.
