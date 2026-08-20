@@ -80,9 +80,9 @@
 // pmBootGuard().
 //
 // CUARTA REGLA (la mañana siguiente): en parqueo, cada milisegundo despierto se
-// paga con celda. Todo lo que se agregue al camino de arranque corre 720 veces
-// al dia, asi que ninguna espera va antes de saber POR QUE despertamos. La
-// observabilidad se agrega para el arranque en frio, no para el repaso.
+// paga con celda. Todo lo que se agregue al camino de arranque corre cientos de
+// veces al dia, asi que ninguna espera va antes de saber POR QUE despertamos.
+// La observabilidad se agrega para el arranque en frio, no para el repaso.
 // ============================================================================
 
 #include <Arduino.h>
@@ -460,7 +460,7 @@ struct GpsPoint {
 // VALIDADO el 2026-08-20: tras un deep sleep y un despertar por ext0, el
 // engine_on salio con el mismo timestamp del engine_off anterior. La cache
 // cruzo el sueno intacta. Y la noche del 19 al 20 aguanto 5 h 35 min y unos
-// 170 despertares seguidos sin corromperse.
+// 600 despertares seguidos sin corromperse.
 //
 // PENDIENTE (cosmetico): el engine_on no deberia republicar una posicion de
 // hace horas. Conviene un limite de antiguedad para ese evento; el engine_off
@@ -1454,7 +1454,7 @@ void setup() {
   // humano con un monitor serial abierto. En un repaso de parqueo no hay nadie
   // escuchando: !SerialMon nunca se hace falso con el USB desconectado, el
   // bucle agota los 3 s completos con el CPU a plena potencia, y eso se paga
-  // con celda 720 veces al dia. Ver el comentario de SERIAL_CDC_WAIT_MS.
+  // con celda cientos de veces al dia. Ver el comentario de SERIAL_CDC_WAIT_MS.
   if (coldBoot) {
     uint32_t serialWaitStart = millis();
     while (!SerialMon && (millis() - serialWaitStart) < SERIAL_CDC_WAIT_MS) {
@@ -1500,7 +1500,7 @@ void setup() {
   //
   // El umbral es PIN_ON_V y no PIN_OFF_V a proposito: con el corte anterior, un
   // pin en zona media (0.6-2.5 V, divisor sucio o cap descargandose) disparaba
-  // un arranque completo con modem + LTE + MQTT + GNSS cada 30 segundos, que es
+  // un arranque completo con modem + LTE + MQTT + GNSS en cada repaso, que es
   // la forma mas rapida que existe de vaciar la 18650. Solo un pin francamente
   // alto significa ignicion encendida.
 #if !TEST_DISABLE_SLEEP
@@ -1544,4 +1544,53 @@ void loop() {
   // Corte por bajo voltaje: vigila en cada vuelta (muestrea cada 10 s).
   if (pmCheckCutoff()) pmEnterCutoff(readBatteryVolts());  // NO retorna
 
-  // Mantener sesión MQTT viva
+  // Mantener sesion MQTT viva
+  if (!modem.isNetworkConnected() || !modem.isGprsConnected()) {
+    SerialMon.println("[NET] down -> reconnect");
+    ensureLTE();
+  }
+
+  serviceMQTT();
+  mqtt.loop();
+
+  serviceEvents();
+  serviceTelemetry();
+  serviceBattery();
+
+  // Nivel 2: dormir cuando el carro esta apagado.
+  //
+  // DEFECTO CORREGIDO (2026-08-20): la condicion exigia pendingEvent == EV_NONE,
+  // pero serviceEvents() solo limpia el pendiente cuando MQTT esta conectado.
+  // Con MQTT caido el evento nunca se limpiaba, la valvula de escape de 5 min
+  // era inalcanzable y el equipo se quedaba despierto vaciando la celda:
+  // exactamente el escenario que el Nivel 2 venia a evitar. Ahora el escape es
+  // por tiempo puro y pendingEvent vive en RTC, asi que el engine_off no se
+  // pierde: sale en el siguiente pulso de parqueo.
+  bool graced      = (millis() > PARK_GRACE_MS);
+  bool eventsDone  = (mqtt.connected() && pendingEvent == EV_NONE);
+  bool giveUpOnNet = (millis() > PARK_FORCE_MS);
+
+  // Anuncio periodico de por que todavia no se parquea. Sin esta linea, un
+  // equipo esperando MQTT y un equipo colgado se ven identicos desde afuera:
+  // ni publica ni imprime. El 2026-08-20 se perdio media hora deduciendo por
+  // consumo (20-40 mA) y por un LWT lo que esta linea habria dicho de frente.
+  static uint32_t lastParkLogMs = 0;
+  if (isIgnitionOff() && (millis() - lastParkLogMs) > PARK_LOG_MS) {
+    lastParkLogMs = millis();
+    SerialMon.printf("[PM] apagado t=%lus mqtt=%d pend=%u gracia=%d forzado_en=%lus\n",
+                     (unsigned long)(millis() / 1000), (int)mqtt.connected(),
+                     (unsigned)pendingEvent, (int)graced,
+                     (unsigned long)(PARK_FORCE_MS / 1000));
+  }
+
+#if !TEST_DISABLE_SLEEP
+  if (isIgnitionOff() && graced && (eventsDone || giveUpOnNet)) {
+    if (!eventsDone) {
+      SerialMon.println("[PM] parqueo forzado: MQTT no levanto, el evento queda en RTC");
+    }
+    pmEnterParked();        // NO retorna
+  }
+#endif
+
+  delay(10);
+}
