@@ -38,9 +38,14 @@
 // bateria + posicion y vuelve a dormir. El corte por bajo voltaje
 // (BAT_CUTOFF_V, con histeresis BAT_RECOVER_V) apaga TODO con AT+CPOF y solo
 // rearma con la celda recuperada o con VBUS presente. El guardian de arranque
-// bloquea cualquier boot sin VBUS por debajo del rearranque, sin encender el
+// bloquea cualquier boot sin VBUS por debajo del corte, sin encender el
 // modem: eso mata el bucle de brownout del 2026-08-18 (10 reconexiones en
 // 108 s, muerte a 2.37 V).
+//
+// REGLA DE ORO DEL NIVEL 2 (aprendida a golpes, 2026-08-20): de esta funcion
+// no se sale nunca sin una fuente de despertar armada. Un deep sleep sin ext0
+// y sin temporizador no es un ahorro de energia, es un ladrillo que solo revive
+// desconectando la bateria. Ver pmDeepSleep().
 // ============================================================================
 
 #include <Arduino.h>
@@ -258,6 +263,19 @@ static const float BAT_DIVIDER_FACTOR = 2.0f;
 #define PARKED_PULSE_S    (24UL * 3600UL)
 #define SETTLE_MS         800     // dejar salir los MQTT antes de desconectar
 
+// Red de seguridad contra el ladrillo: si por cualquier razon no se pudo armar
+// ext0, se duerme con temporizador en vez de quedarse dormido para siempre.
+#define SLEEP_FALLBACK_S  30UL
+
+// Con la celda bajo el piso y sin VBUS no se enciende nada, pero se repasa una
+// vez por hora para poder notar la recuperacion y volver a la vida solo.
+#define GUARD_RECHECK_S   3600UL
+
+// Parqueo desde el loop: minuto de gracia para terminar el boot y publicar el
+// engine_off; a los 5 min se duerme igual aunque MQTT nunca haya levantado.
+#define PARK_GRACE_MS     60000UL
+#define PARK_FORCE_MS     300000UL
+
 // ---- BANCO DE PRUEBAS (todo en 0 para produccion) ----
 #define TEST_BAT_OFFSET_V 0.00f   // sube TODOS los umbrales de bateria
 #define TEST_FORCE_PARKED 0       // 1 = se comporta apagado aunque haya VBUS
@@ -304,7 +322,11 @@ static uint32_t midzoneSinceMs = 0;
 static bool midzoneWarned = false;
 
 enum PendingEvent : uint8_t { EV_NONE = 0, EV_ENGINE_ON = 1, EV_ENGINE_OFF = 2 };
-static PendingEvent pendingEvent = EV_NONE;
+
+// RTC_DATA_ATTR: el parqueo forzado (MQTT caido) se lleva el evento pendiente a
+// dormir. Sin persistirlo, el engine_off se perdia para siempre; asi sale en el
+// siguiente pulso de parqueo, aunque llegue tarde.
+static RTC_DATA_ATTR PendingEvent pendingEvent = EV_NONE;
 
 // ---------- Ultimo punto valido ----------
 // Se cachea para poder publicar el evento de apagado y los pulsos de parqueo
@@ -912,14 +934,35 @@ static inline float warnV()    { return BAT_WARN_V    + TEST_BAT_OFFSET_V; }
 
 static bool pmVbusPresent() { return readPinVolts() >= PIN_ON_V; }
 
+// Unica puerta al deep sleep de todo el firmware.
+//
+// DEFECTO CORREGIDO (2026-08-20): antes ext0 solo se armaba si el pin estaba
+// bajo en ese instante, y varios llamadores pasaban timerSeconds = 0. Con el
+// pin alto por cualquier motivo (transitorio del buck, zona media, el cap de
+// 100 nF todavia cargado, USB recien conectado) el resultado era un deep sleep
+// SIN NINGUNA fuente de despertar: el equipo quedaba muerto hasta que se le
+// quitara la alimentacion a mano. Ahora es imposible salir de aqui sin al
+// menos una fuente armada, y se deja constancia en el serial.
 static void pmDeepSleep(bool wakeOnIgnition, uint32_t timerSeconds) {
+  bool ext0Armed = false;
+
   // ext0 solo si el pin esta BAJO ahora: si esta alto, despertaria de inmediato.
   if (wakeOnIgnition && !pmVbusPresent()) {
     esp_sleep_enable_ext0_wakeup((gpio_num_t)SENSE_PIN, 1);
+    ext0Armed = true;
   }
+
+  if (timerSeconds == 0 && !ext0Armed) {
+    timerSeconds = SLEEP_FALLBACK_S;
+    SerialMon.println("[PM] sin ext0 -> temporizador de respaldo para no quedar dormido para siempre");
+  }
+
   if (timerSeconds > 0) {
     esp_sleep_enable_timer_wakeup((uint64_t)timerSeconds * 1000000ULL);
   }
+
+  SerialMon.printf("[PM] deep sleep ext0=%d timer=%lus\n",
+                   (int)ext0Armed, (unsigned long)timerSeconds);
   SerialMon.flush();
   esp_deep_sleep_start();  // no retorna
 }
@@ -961,6 +1004,21 @@ static void pmModemWake() {
   modem.waitResponse(1000);
 }
 
+// DEFECTO CORREGIDO (2026-08-20): pmParkedTick() llamaba pmModemWake() aun
+// cuando el modem estaba apagado de verdad (rtcModemAlive = false tras un
+// +CPOF). Bajar el DTR no revive un modem apagado: hay que pulsar PWRKEY. Y al
+// contrario, pulsar PWRKEY con el modem encendido lo APAGA. Esta funcion es la
+// unica que decide entre las dos cosas.
+static void pmModemResume() {
+  if (rtcModemAlive) {
+    pmModemWake();               // seguia vivo en DTR sleep: basta con bajar DTR
+  } else {
+    modemPowerOn();
+    waitForAT();
+    rtcModemAlive = true;
+  }
+}
+
 // AT crudo a proposito: la firma de disableGPS() en el fork de lewisxhe no esta
 // verificada, y AT+CGNSSPWR=0 si esta comprobado en banco.
 static void pmGnssOff() {
@@ -968,45 +1026,69 @@ static void pmGnssOff() {
   modem.waitResponse(10000);
 }
 
-static void pmGnssOn() {
-  while (!modem.enableGPS(MODEM_GPS_ENABLE_GPIO, MODEM_GPS_ENABLE_LEVEL)) {
+// DEFECTO CORREGIDO (2026-08-20): era un while infinito alimentando el WDT. Si
+// el GNSS no encendia, el firmware se quedaba colgado para siempre sin que el
+// watchdog lo rescatara. Ahora son intentos acotados y se sigue sin GNSS: el
+// tracker todavia sirve para reportar bateria, ignicion y la ultima posicion.
+static bool pmGnssOn() {
+  for (uint8_t i = 0; i < 20; i++) {
+    if (modem.enableGPS(MODEM_GPS_ENABLE_GPIO, MODEM_GPS_ENABLE_LEVEL)) {
+      modem.setGPSBaud(115200);
+
+      // Modo GNSS multi-constelacion: 15 = GPS + GLONASS + GALILEO + BDS.
+      // AT+CGNSSMODE solo es aceptado por el modem cuando el GNSS ya esta
+      // encendido (verificado en banco 2026-08-16, firmware
+      // SIM767XM5_B05V01_241206), por eso va DESPUES de enableGPS(). El valor
+      // persiste en la NVRAM del modem (sobrevive reflashes del ESP32 y
+      // apagados), pero se fija en cada boot para que el comportamiento sea
+      // deterministico.
+      if (modem.setGPSMode(15)) {
+        SerialMon.println("GNSS mode 15 (GPS+GLONASS+GALILEO+BDS)");
+      } else {
+        SerialMon.println("GNSS mode 15 FAIL (no critico, sigue en modo actual)");
+      }
+      return true;
+    }
     SerialMon.print(".");
     watchdogFeed();
     delay(500);
   }
-  modem.setGPSBaud(115200);
 
-  // Modo GNSS multi-constelacion: 15 = GPS + GLONASS + GALILEO + BDS.
-  // AT+CGNSSMODE solo es aceptado por el modem cuando el GNSS ya esta
-  // encendido (verificado en banco 2026-08-16, firmware SIM767XM5_B05V01_241206),
-  // por eso va DESPUES de enableGPS(). El valor persiste en la NVRAM del
-  // modem (sobrevive reflashes del ESP32 y apagados), pero se fija en cada
-  // boot para que el comportamiento sea deterministico.
-  if (modem.setGPSMode(15)) {
-    SerialMon.println("GNSS mode 15 (GPS+GLONASS+GALILEO+BDS)");
-  } else {
-    SerialMon.println("GNSS mode 15 FAIL (no critico, sigue en modo actual)");
-  }
+  SerialMon.println("\n[GNSS] no encendio tras 20 intentos -> se sigue sin GNSS");
+  return false;
 }
 
 // ---------------- Guardian de arranque ----------------
 // Se llama DESPUES de adcSetup(): sin la atenuacion configurada, la lectura de
 // bateria sale mal y el guardian decidiria sobre un numero inventado.
+//
+// DEFECTO CORREGIDO (2026-08-20): el guardian usaba el umbral de REARRANQUE
+// (3.80 V) como piso de arranque, sin histeresis. Una celda perfectamente sana
+// en 3.7 V (~40 % de carga) con el carro parqueado hacia que el equipo se
+// durmiera en el boot sin encender el modem y sin temporizador: tracker mudo
+// justo en la mitad de la curva de descarga, y encima invisible. La histeresis
+// correcta necesita las DOS puntas: se bloquea bajo el corte (3.50 V), y solo
+// se exige el rearranque (3.80 V) cuando venimos de un corte real, que es lo
+// que rtcInCutoff recuerda a traves del deep sleep. Y se duerme con repaso
+// horario, para poder notar la recuperacion en vez de esperar la ignicion.
 static void pmBootGuard() {
   rtcBootCount++;
 
   float v    = readBatteryVolts();
   bool  vbus = pmVbusPresent();
 
-  SerialMon.printf("[PM] boot#%lu wake=%d bat=%.2f vbus=%d corte=%.2f rearranque=%.2f\n",
+  SerialMon.printf("[PM] boot#%lu wake=%d bat=%.2f vbus=%d corte=%.2f rearranque=%.2f corte_previo=%d\n",
                    (unsigned long)rtcBootCount, (int)esp_sleep_get_wakeup_cause(),
-                   v, (int)vbus, cutoffV(), recoverV());
+                   v, (int)vbus, cutoffV(), recoverV(), (int)rtcInCutoff);
 
-  if (!vbus && v < recoverV()) {
-    SerialMon.println("[PM] bateria bajo rearranque -> deep sleep SIN encender modem");
+  bool belowFloor    = (v <= cutoffV());
+  bool stillInCutoff = (rtcInCutoff && v < recoverV());
+
+  if (!vbus && (belowFloor || stillInCutoff)) {
+    SerialMon.println("[PM] celda bajo el piso -> deep sleep SIN encender modem");
     rtcInCutoff   = true;
     rtcModemAlive = false;
-    pmDeepSleep(true, 0);         // solo ext0, sin temporizador
+    pmDeepSleep(true, GUARD_RECHECK_S);   // ext0 + repaso horario
   }
   rtcInCutoff = false;
 }
@@ -1059,7 +1141,7 @@ static void pmEnterCutoff(float v) {
   rtcStrikes    = 0;
 
   SerialMon.println("[PM] corte por bajo voltaje -> deep sleep hasta ver VBUS");
-  pmDeepSleep(true, 0);
+  pmDeepSleep(true, GUARD_RECHECK_S);
 }
 
 // ---------------- Nivel 2: parqueo ----------------
@@ -1091,7 +1173,7 @@ static void pmParkedTick() {
   if (!pmVbusPresent()) {
     if (v <= cutoffV()) rtcStrikes++; else rtcStrikes = 0;
     if (rtcStrikes >= BAT_CUTOFF_N) {
-      pmModemWake();
+      pmModemResume();
       ensureLTE();
       if (tryConnectMQTT()) pmEnterCutoff(v);   // no retorna
       pmGnssOff();
@@ -1099,20 +1181,23 @@ static void pmParkedTick() {
       modem.waitResponse(10000);
       rtcModemAlive = false;
       rtcInCutoff   = true;
-      pmDeepSleep(true, 0);
+      pmDeepSleep(true, GUARD_RECHECK_S);
     }
   }
 
   uint32_t pulse = (TEST_PULSE_S > 0) ? TEST_PULSE_S : PARKED_PULSE_S;
   if (rtcSleptSeconds >= pulse) {
     SerialMon.printf("[PM] pulso de bateria bat=%.2f\n", v);
-    pmModemWake();
+    pmModemResume();
     ensureLTE();
     if (tryConnectMQTT()) {
       char b[16];
       snprintf(b, sizeof(b), "%.2f", v);
       mqtt.publish(TOPIC_BATTERY, b, true);
       publishStatus("parked_pulse");
+      // Si un parqueo forzado (MQTT caido) se llevo el engine_off a dormir,
+      // este es el momento de sacarlo: llega tarde, pero llega.
+      serviceEvents();
       // El "sigo aqui" para Traccar: mismo contrato que el keepalive del
       // Nivel 1. ignition=0 en el CSV hace que el subscriber lo deje pasar.
       publishPoint(lastValidPoint, EVENT_NONE);
@@ -1138,7 +1223,7 @@ void setup() {
   // inventado.
   adcSetup();
 
-  pmBootGuard();            // si la celda esta bajo rearranque, duerme aqui mismo
+  pmBootGuard();            // si la celda esta bajo el piso, duerme aqui mismo
 
   // Arranca el reloj del ralenti desde el boot. Sin esto, un vehiculo encendido
   // que nunca supera MOVING_SPEED_KMH se queda para siempre en cadencia rapida.
@@ -1156,24 +1241,25 @@ void setup() {
   // decidir y volver a dormir sin tocar el modem.
   SerialAT.begin(MODEM_BAUDRATE, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
 
-  // Despertar por temporizador con la ignicion apagada = seguir parqueado.
+  // Despertar por temporizador sin ignicion = seguir parqueado.
   // OJO: ignState no sobrevive al deep sleep (arranca en IGN_UNKNOWN), asi que
   // la decision se toma del pin directamente; isIgnitionOff() solo esta en la
   // condicion para cubrir el banco (TEST_FORCE_PARKED), donde el pin esta alto
   // por el VBUS de la fuente.
+  //
+  // El umbral es PIN_ON_V y no PIN_OFF_V a proposito: con el corte anterior, un
+  // pin en zona media (0.6-2.5 V, divisor sucio o cap descargandose) disparaba
+  // un arranque completo con modem + LTE + MQTT + GNSS cada 30 segundos, que es
+  // la forma mas rapida que existe de vaciar la 18650. Solo un pin francamente
+  // alto significa ignicion encendida.
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER &&
-      (isIgnitionOff() || bootPinV <= PIN_OFF_V)) {
+      (isIgnitionOff() || bootPinV < PIN_ON_V)) {
     pmParkedTick();         // NO retorna
   }
 
-  if (!rtcModemAlive) {
-    modemPowerOn();         // PWRKEY solo si el modem estaba apagado de verdad:
-                            // pulsarlo con el modem encendido lo APAGA
-    waitForAT();
-    rtcModemAlive = true;
-  } else {
-    pmModemWake();          // seguia vivo en DTR sleep: basta con bajar DTR
-  }
+  // PWRKEY solo si el modem estaba apagado de verdad: pulsarlo con el modem
+  // encendido lo APAGA.
+  pmModemResume();
 
   // 1) LTE up
   ensureLTE();
@@ -1184,8 +1270,9 @@ void setup() {
 
   // 3) GPS on
   SerialMon.println("Enabling GPS...");
-  pmGnssOn();
-  SerialMon.println("GPS Enabled");
+  if (pmGnssOn()) {
+    SerialMon.println("GPS Enabled");
+  }
 }
 
 void loop() {
@@ -1215,13 +1302,23 @@ void loop() {
   serviceTelemetry();
   serviceBattery();
 
-  // Nivel 2: dormir solo cuando el engine_off ya salio (pendingEvent limpio).
-  // El minuto de gracia deja terminar el boot y publicar; los 5 min son la
-  // valvula de escape si MQTT nunca levanta, para no quemar bateria intentando.
-  // Con TEST_FORCE_PARKED no hace falta rama aparte para el banco: la misma
-  // condicion entra a parqueo al minuto de arrancar.
-  if (isIgnitionOff() && pendingEvent == EV_NONE &&
-      millis() > 60000 && (mqtt.connected() || millis() > 300000)) {
+  // Nivel 2: dormir cuando el carro esta apagado.
+  //
+  // DEFECTO CORREGIDO (2026-08-20): la condicion exigia pendingEvent == EV_NONE,
+  // pero serviceEvents() solo limpia el pendiente cuando MQTT esta conectado.
+  // Con MQTT caido el evento nunca se limpiaba, la valvula de escape de 5 min
+  // era inalcanzable y el equipo se quedaba despierto vaciando la celda:
+  // exactamente el escenario que el Nivel 2 venia a evitar. Ahora el escape es
+  // por tiempo puro y pendingEvent vive en RTC, asi que el engine_off no se
+  // pierde: sale en el siguiente pulso de parqueo.
+  bool graced      = (millis() > PARK_GRACE_MS);
+  bool eventsDone  = (mqtt.connected() && pendingEvent == EV_NONE);
+  bool giveUpOnNet = (millis() > PARK_FORCE_MS);
+
+  if (isIgnitionOff() && graced && (eventsDone || giveUpOnNet)) {
+    if (!eventsDone) {
+      SerialMon.println("[PM] parqueo forzado: MQTT no levanto, el evento queda en RTC");
+    }
     pmEnterParked();        // NO retorna
   }
 
