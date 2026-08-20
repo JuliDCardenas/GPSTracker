@@ -42,10 +42,23 @@
 // modem: eso mata el bucle de brownout del 2026-08-18 (10 reconexiones en
 // 108 s, muerte a 2.37 V).
 //
+// OJO CON EL RETRASO DE DETECCION: los 30 s del repaso NO son la latencia de
+// deteccion de la ignicion. El despertar real lo hace ext0, que es una
+// interrupcion de hardware en GPIO9 y es instantanea. El temporizador existe
+// como red de seguridad (si ext0 no se pudo armar) y para vigilar el voltaje
+// de la celda mientras duerme. Al encender el carro, lo que se demora son el
+// antirrebote (3 s) y el re-attach de LTE+MQTT (~5-15 s), no el sondeo.
+//
 // REGLA DE ORO DEL NIVEL 2 (aprendida a golpes, 2026-08-20): de esta funcion
 // no se sale nunca sin una fuente de despertar armada. Un deep sleep sin ext0
 // y sin temporizador no es un ahorro de energia, es un ladrillo que solo revive
 // desconectando la bateria. Ver pmDeepSleep().
+//
+// SEGUNDA REGLA (misma noche, mismo precio): si el firmware puede quedarse
+// varios minutos sin publicar y sin imprimir, entonces un cuelgue y una espera
+// normal se ven EXACTAMENTE igual, y se depura a ciegas adivinando. Todo estado
+// que dure mas de unos segundos tiene que anunciarse. Ver el log periodico del
+// loop y TEST_DISABLE_SLEEP.
 // ============================================================================
 
 #include <Arduino.h>
@@ -115,6 +128,12 @@ const char TOPIC_STATUS[] = "tracker/Lilygo/sys/status";
 
 // Estado de ignicion retenido, mismo contrato que usaban los firmwares de
 // prueba adc_sense_wifi / adc_sense_field, para no romper lo que ya escuche n8n.
+//
+// OJO AL DEPURAR CON mosquitto_sub: este topic, TOPIC_LWT, TOPIC_STATUS y
+// TOPIC_BATTERY son retained, asi que el broker te los entrega de golpe al
+// suscribirte. Esas primeras lineas son la foto de la sesion ANTERIOR, no
+// actividad nueva. El 2026-08-20 eso costo un diagnostico equivocado: se leyo
+// un "ignition on" retenido como si fuera un evento del momento.
 const char TOPIC_IGNITION[] = "tracker/Lilygo/event/ignition";
 
 // Voltaje de la 18650. Va en topic aparte y no dentro del CSV para no tocar el
@@ -212,6 +231,9 @@ static const uint32_t WDT_TIMEOUT_SEC = 120;
 // con la temperatura. Los umbrales ON/OFF no se ven afectados porque estan
 // definidos sobre el pin, no sobre VBUS.
 //
+// RECONFIRMADO el 2026-08-20, tres dias despues: el firmware reporto
+// pin=2.721V -> vbus=5.27V con el mismo montaje. La calibracion aguanta.
+//
 // Pendiente de hardware (tarea aparte): bajar el divisor a 10k/12k y ajustar el
 // pot del MP1584 de 5.25 V a 5.05-5.10 V. Ahi habra que recalibrar este factor
 // y bajar el umbral ON a 2.2 V.
@@ -255,10 +277,28 @@ static const float BAT_DIVIDER_FACTOR = 2.0f;
 #define BAT_CUTOFF_N      5       // lecturas consecutivas bajo corte
 #define BAT_SAMPLE_MS     10000UL // 5 x 10 s = 50 s sostenidos
 
+// Piso de PLAUSIBILIDAD, que no es lo mismo que un umbral de corte.
+//
+// Por debajo de esto la lectura no describe una celda descargada: describe una
+// celda que no se puede medir (sin 18650 puesta, divisor sin alimentar, placa
+// corriendo solo de USB). Tratar 0.00 V como "celda agotada" hacia que el
+// guardian durmiera el equipo una hora ANTES de que el puerto USB CDC
+// enumerara, o sea de forma completamente invisible: monitor en blanco y
+// aparentemente un ladrillo.
+//
+// El limite va en 2.0 V a proposito: los 2.37 V de la muerte del 2026-08-18
+// quedan por encima y siguen siendo detectados como lo que son, una celda
+// agonizando. Una 18650 real nunca reporta 1.9 V por este divisor.
+#define BAT_PLAUSIBLE_MIN_V 2.00f
+
 // Parqueo profundo: el ESP32 duerme y repasa la ignicion cada 30 s. El ext0 la
 // detecta al instante si el margen del divisor alcanza (~2.62 V contra un
-// umbral digital de ~2.48 V); el temporizador es la red de seguridad. Una vez
-// al dia sale el pulso de bateria/posicion.
+// umbral digital de ~2.48 V); el temporizador es la red de seguridad.
+//
+// PARKED_POLL_S no es la latencia de deteccion (eso lo hace ext0, instantaneo):
+// es cada cuanto se revisa la bateria mientras duerme. Se puede subir a 60 o
+// 120 s para ahorrar despertares una vez el Nivel 2 este cerrado; cada repaso
+// es un arranque completo del ESP32.
 #define PARKED_POLL_S     30UL
 #define PARKED_PULSE_S    (24UL * 3600UL)
 #define SETTLE_MS         800     // dejar salir los MQTT antes de desconectar
@@ -276,10 +316,31 @@ static const float BAT_DIVIDER_FACTOR = 2.0f;
 #define PARK_GRACE_MS     60000UL
 #define PARK_FORCE_MS     300000UL
 
+// Cada cuanto se anuncia por serial que se esta esperando para parquear. Sin
+// esto, "esperando MQTT" y "colgado" se ven identicos desde afuera.
+#define PARK_LOG_MS       10000UL
+
+// Espera maxima a que el host abra el puerto USB CDC antes de imprimir. Con
+// ARDUINO_USB_CDC_ON_BOOT=1, Serial es el USB nativo del S3 y el host tarda
+// 1-2 s en enumerarlo tras un reset: sin esta espera se pierden las primeras
+// lineas del arranque, justo las del guardian de bateria.
+#define SERIAL_CDC_WAIT_MS 3000UL
+
 // ---- BANCO DE PRUEBAS (todo en 0 para produccion) ----
 #define TEST_BAT_OFFSET_V 0.00f   // sube TODOS los umbrales de bateria
 #define TEST_FORCE_PARKED 0       // 1 = se comporta apagado aunque haya VBUS
 #define TEST_PULSE_S      0UL     // >0 = acorta el pulso para ver varios ciclos
+
+// 1 = NO se duerme nunca, ni por parqueo ni por el guardian de arranque.
+//
+// Depurar el Nivel 2 en el escritorio es imposible sin esto: cada deep sleep
+// hace desaparecer el dispositivo USB, el monitor serial muere y no vuelve, y
+// la placa se escapa a dormir a los 60 s del arranque. Toca BOOT+RESET para
+// recuperarla. Con esto en 1 el equipo se queda despierto y observable.
+//
+// OJO: en 1 no se prueba nada del Nivel 2. Sirve para depurar ignicion,
+// bateria, LTE y MQTT con el serial vivo. Volver a 0 para probar el parqueo.
+#define TEST_DISABLE_SLEEP 0
 
 // ---------- Validación GNSS ----------
 // PENDIENTE: verificar la unidad real que entrega AT+CGNSSINFO. La evidencia
@@ -348,6 +409,14 @@ struct GpsPoint {
 // RTC_DATA_ATTR: sin esto, el deep sleep borraba la cache y el pulso de
 // parqueo publicaba "aun no hay posicion valida" toda la noche. GpsPoint es
 // POD (floats, bools y un char[24]), cabe sin problema en la RTC slow memory.
+//
+// VALIDADO el 2026-08-20: tras un deep sleep y un despertar por ext0, el
+// engine_on salio con el mismo timestamp del engine_off anterior. La cache
+// cruzo el sueno intacta.
+//
+// PENDIENTE (cosmetico): el engine_on no deberia republicar una posicion de
+// hace horas. Conviene un limite de antiguedad para ese evento; el engine_off
+// si la quiere siempre, porque es el "aqui quedo parqueado".
 static RTC_DATA_ATTR GpsPoint lastValidPoint = {};
 static uint32_t lastMovementMs = 0;
 static uint32_t lastPublishMs = 0;
@@ -466,6 +535,11 @@ static float readBatteryVolts() {
   return ((acc_mv / (float)BAT_SAMPLES) / 1000.0f) * BAT_DIVIDER_FACTOR;
 }
 
+// La lectura describe una celda de verdad, o el divisor no esta dando nada?
+static bool batteryReadingPlausible(float v) {
+  return v >= BAT_PLAUSIBLE_MIN_V;
+}
+
 static bool isIgnitionOff() {
 #if TEST_FORCE_PARKED
   return true;  // banco: finge carro apagado aunque haya VBUS
@@ -580,8 +654,13 @@ static void modemPowerOn() {
 static void waitForAT() {
   SerialMon.println("Start modem...");
   delay(3000);
+  uint32_t t0 = millis();
   while (!modem.testAT(1000)) {
-    SerialMon.println("AT fail, retrying...");
+    // Este bucle alimenta el WDT, asi que no se reinicia solo: si el modem no
+    // responde, el firmware se queda aqui. Al menos que se vea en el log cuanto
+    // lleva esperando, para distinguirlo de un cuelgue mudo.
+    SerialMon.printf("AT fail, retrying... (%lus)\n",
+                     (unsigned long)((millis() - t0) / 1000));
     watchdogFeed();
     delay(1000);
   }
@@ -659,6 +738,10 @@ static bool tryConnectMQTT() {
   // la sesion anterior y publica su will. Por eso en los logs del servidor se
   // ve un "offline" seguido de un "online" unos 200 ms despues; es la toma de
   // relevo, no una caida de enlace.
+  //
+  // Y al contrario: un "offline" SIN "online" detras significa que la sesion
+  // vieja murio y la nueva nunca llego a conectar. Eso paso el 2026-08-20 y es
+  // la firma de que el firmware arranco pero se quedo sin MQTT.
   bool ok = mqtt.connect(
       clientId.c_str(),
       MQTT_USER,
@@ -681,7 +764,9 @@ static bool tryConnectMQTT() {
     // bootStatusPublished vive en RTC_DATA_ATTR precisamente para que este
     // forense no se autodestruya con los despertares del Nivel 2.
     // Verificado en la noche del 2026-08-17 al 18: amanecio en "boot" tras
-    // 8 h 22 min y 25 keepalives sin perder uno.
+    // 8 h 22 min y 25 keepalives sin perder uno. Y el 2026-08-20 sirvio para
+    // probar que un despertar por ext0 salio de deep sleep y no de un reset:
+    // publico "mqtt_reconnected", o sea que la RTC memory sobrevivio.
     publishStatus(bootStatusPublished ? "mqtt_reconnected" : "boot");
     bootStatusPublished = true;
 
@@ -1011,8 +1096,10 @@ static void pmModemWake() {
 // unica que decide entre las dos cosas.
 static void pmModemResume() {
   if (rtcModemAlive) {
-    pmModemWake();               // seguia vivo en DTR sleep: basta con bajar DTR
+    SerialMon.println("[PM] modem vivo -> despertar por DTR");
+    pmModemWake();
   } else {
+    SerialMon.println("[PM] modem apagado -> PWRKEY");
     modemPowerOn();
     waitForAT();
     rtcModemAlive = true;
@@ -1071,6 +1158,11 @@ static bool pmGnssOn() {
 // se exige el rearranque (3.80 V) cuando venimos de un corte real, que es lo
 // que rtcInCutoff recuerda a traves del deep sleep. Y se duerme con repaso
 // horario, para poder notar la recuperacion en vez de esperar la ignicion.
+//
+// SEGUNDO ARREGLO (mismo dia): una lectura implausible ya no bloquea. Sin
+// 18650 puesta el ADC devuelve ~0.00 V, y 0.00 <= 3.50 dormia el equipo una
+// hora antes de que el USB CDC enumerara. Desde afuera: monitor en blanco,
+// mosquitto en blanco, placa aparentemente muerta.
 static void pmBootGuard() {
   rtcBootCount++;
 
@@ -1081,14 +1173,24 @@ static void pmBootGuard() {
                    (unsigned long)rtcBootCount, (int)esp_sleep_get_wakeup_cause(),
                    v, (int)vbus, cutoffV(), recoverV(), (int)rtcInCutoff);
 
+  if (!batteryReadingPlausible(v)) {
+    SerialMon.printf("[PM] lectura de bateria implausible (%.2fV) -> no se bloquea el arranque\n", v);
+    rtcInCutoff = false;
+    return;
+  }
+
   bool belowFloor    = (v <= cutoffV());
   bool stillInCutoff = (rtcInCutoff && v < recoverV());
 
   if (!vbus && (belowFloor || stillInCutoff)) {
+#if TEST_DISABLE_SLEEP
+    SerialMon.println("[PM] celda bajo el piso, pero TEST_DISABLE_SLEEP=1 -> se sigue de todas formas");
+#else
     SerialMon.println("[PM] celda bajo el piso -> deep sleep SIN encender modem");
     rtcInCutoff   = true;
     rtcModemAlive = false;
     pmDeepSleep(true, GUARD_RECHECK_S);   // ext0 + repaso horario
+#endif
   }
   rtcInCutoff = false;
 }
@@ -1103,6 +1205,12 @@ static bool pmCheckCutoff() {
   if (pmVbusPresent()) { rtcStrikes = 0; return false; }  // cargando: no cortar
 
   float v = readBatteryVolts();
+  if (!batteryReadingPlausible(v)) {
+    SerialMon.printf("[PM] bat=%.2f implausible -> no cuenta para el corte\n", v);
+    rtcStrikes = 0;
+    return false;
+  }
+
   if (v <= cutoffV()) rtcStrikes++; else rtcStrikes = 0;
 
   // Aviso temprano, una sola vez al cruzar BAT_WARN_V; se rearma al recuperar.
@@ -1147,6 +1255,12 @@ static void pmEnterCutoff(float v) {
 // ---------------- Nivel 2: parqueo ----------------
 // El engine_off ya lo publico serviceEvents(); aqui NO se repite.
 static void pmEnterParked() {
+  // Este log va ANTES de cualquier publicacion: si MQTT esta caido, el parqueo
+  // no deja ninguna huella en el broker, y sin esta linea era indistinguible
+  // de un cuelgue (2026-08-20).
+  SerialMon.printf("[PM] entrando a parqueo mqtt=%d bat=%.2f\n",
+                   (int)mqtt.connected(), readBatteryVolts());
+
   char b[16];
   snprintf(b, sizeof(b), "%.2f", readBatteryVolts());
   mqtt.publish(TOPIC_BATTERY, b, true);
@@ -1168,9 +1282,13 @@ static void pmParkedTick() {
   rtcSleptSeconds += PARKED_POLL_S;
   float v = readBatteryVolts();
 
+  uint32_t pulse = (TEST_PULSE_S > 0) ? TEST_PULSE_S : PARKED_PULSE_S;
+  SerialMon.printf("[PM] repaso parqueo dormido=%lus/%lus bat=%.2f\n",
+                   (unsigned long)rtcSleptSeconds, (unsigned long)pulse, v);
+
   // El corte tambien vigila dormido, y aqui la lectura es limpia: no hay
   // rafagas LTE hundiendo el riel, asi que no hay falsos positivos por sag.
-  if (!pmVbusPresent()) {
+  if (!pmVbusPresent() && batteryReadingPlausible(v)) {
     if (v <= cutoffV()) rtcStrikes++; else rtcStrikes = 0;
     if (rtcStrikes >= BAT_CUTOFF_N) {
       pmModemResume();
@@ -1185,7 +1303,6 @@ static void pmParkedTick() {
     }
   }
 
-  uint32_t pulse = (TEST_PULSE_S > 0) ? TEST_PULSE_S : PARKED_PULSE_S;
   if (rtcSleptSeconds >= pulse) {
     SerialMon.printf("[PM] pulso de bateria bat=%.2f\n", v);
     pmModemResume();
@@ -1204,6 +1321,8 @@ static void pmParkedTick() {
       delay(SETTLE_MS);
       mqtt.loop();
       pmDisconnectClean();
+    } else {
+      SerialMon.println("[PM] pulso sin MQTT -> se reintenta en el siguiente");
     }
     pmModemSleep();
     rtcSleptSeconds = 0;
@@ -1214,9 +1333,24 @@ static void pmParkedTick() {
 
 void setup() {
   SerialMon.begin(115200);
-  delay(200);
+
+  // Con ARDUINO_USB_CDC_ON_BOOT=1, Serial es el USB nativo del S3: tras un
+  // reset el host tarda 1-2 s en enumerar el puerto y todo lo que se imprima
+  // antes se pierde. El 2026-08-20 eso oculto la linea [PM] boot#, que es
+  // precisamente la que explica como decidio el guardian de bateria. El
+  // operador && corta la espera si nadie esta escuchando, asi que en el carro
+  // esto no cuesta nada.
+  uint32_t serialWaitStart = millis();
+  while (!SerialMon && (millis() - serialWaitStart) < SERIAL_CDC_WAIT_MS) {
+    delay(10);
+  }
+  delay(300);
 
   watchdogSetup();
+
+#if TEST_DISABLE_SLEEP
+  SerialMon.println("[PM] *** TEST_DISABLE_SLEEP=1: no se dormira nunca (modo banco) ***");
+#endif
 
   // OBLIGATORIO antes de pmBootGuard(): sin la atenuacion del ADC configurada,
   // la lectura de bateria sale mal y el guardian decidiria sobre un numero
@@ -1252,10 +1386,12 @@ void setup() {
   // un arranque completo con modem + LTE + MQTT + GNSS cada 30 segundos, que es
   // la forma mas rapida que existe de vaciar la 18650. Solo un pin francamente
   // alto significa ignicion encendida.
+#if !TEST_DISABLE_SLEEP
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER &&
       (isIgnitionOff() || bootPinV < PIN_ON_V)) {
     pmParkedTick();         // NO retorna
   }
+#endif
 
   // PWRKEY solo si el modem estaba apagado de verdad: pulsarlo con el modem
   // encendido lo APAGA.
@@ -1315,12 +1451,27 @@ void loop() {
   bool eventsDone  = (mqtt.connected() && pendingEvent == EV_NONE);
   bool giveUpOnNet = (millis() > PARK_FORCE_MS);
 
+  // Anuncio periodico de por que todavia no se parquea. Sin esta linea, un
+  // equipo esperando MQTT y un equipo colgado se ven identicos desde afuera:
+  // ni publica ni imprime. El 2026-08-20 se perdio media hora deduciendo por
+  // consumo (20-40 mA) y por un LWT lo que esta linea habria dicho de frente.
+  static uint32_t lastParkLogMs = 0;
+  if (isIgnitionOff() && (millis() - lastParkLogMs) > PARK_LOG_MS) {
+    lastParkLogMs = millis();
+    SerialMon.printf("[PM] apagado t=%lus mqtt=%d pend=%u gracia=%d forzado_en=%lus\n",
+                     (unsigned long)(millis() / 1000), (int)mqtt.connected(),
+                     (unsigned)pendingEvent, (int)graced,
+                     (unsigned long)(PARK_FORCE_MS / 1000));
+  }
+
+#if !TEST_DISABLE_SLEEP
   if (isIgnitionOff() && graced && (eventsDone || giveUpOnNet)) {
     if (!eventsDone) {
       SerialMon.println("[PM] parqueo forzado: MQTT no levanto, el evento queda en RTC");
     }
     pmEnterParked();        // NO retorna
   }
+#endif
 
   delay(10);
 }
