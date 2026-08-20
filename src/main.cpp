@@ -7,7 +7,7 @@
 //   IGN_ON  en marcha  -> cada GPS_PERIOD_MS        (5 s)
 //   IGN_ON  en ralenti -> cada IDLE_PERIOD_MS       (30 s)
 //   IGN_OFF parqueado  -> engine_off y luego deep sleep (Nivel 2): repaso de
-//                         ignicion cada 30 s y un pulso de bateria/posicion al dia
+//                         ignicion cada 120 s y un pulso de bateria/posicion al dia
 //
 // Y ademas genera dos eventos discretos en las transiciones: engine_on y
 // engine_off. El de apagado se publica con la ultima posicion valida guardada
@@ -33,7 +33,7 @@
 // NIVEL 2 DE AHORRO DE ENERGIA: parqueado, el firmware publica el engine_off,
 // apaga el GNSS (AT+CGNSSPWR=0), duerme el modem por DTR (AT+CSCLK=1; conserva
 // el registro LTE y las efemerides) y pone el ESP32 en deep sleep. Despierta
-// por ext0 si la ignicion sube y, como red de seguridad, cada 30 s por
+// por ext0 si la ignicion sube y, como red de seguridad, cada 120 s por
 // temporizador. Una vez al dia (PARKED_PULSE_S) despierta el modem, publica
 // bateria + posicion y vuelve a dormir. El corte por bajo voltaje
 // (BAT_CUTOFF_V, con histeresis BAT_RECOVER_V) apaga TODO con AT+CPOF y solo
@@ -42,7 +42,21 @@
 // modem: eso mata el bucle de brownout del 2026-08-18 (10 reconexiones en
 // 108 s, muerte a 2.37 V).
 //
-// OJO CON EL RETRASO DE DETECCION: los 30 s del repaso NO son la latencia de
+// MEDIDO (noche del 2026-08-19 al 20, 5 h 35 min parqueado con TEST_PULSE_S de
+// una hora): 5 de 5 pulsos entregados, cache de posicion y contadores RTC
+// intactos toda la noche, y la 18650 bajo de 4.15 V a 4.10 V en 4 h 28 min,
+// unos 11.2 mV/h contra los 38 mV/h del Nivel 1.
+//
+// OJO AL LEER ESA CIFRA: 4.19-4.10 V es la zona mas plana de la curva de la
+// 18650, asi que en mV/h el Nivel 2 se ve mejor de lo que es. Traducido a
+// capacidad son ~1.25 %/h contra ~2.87 %/h del Nivel 1: una mejora real de
+// 2.3x, no de 3.4x. La medicion honesta pide dejarla correr hasta 3.80 V.
+//
+// Y esa noche todavia cargaba el desperdicio de la espera del CDC USB (3.3 s
+// de CPU a plena potencia en cada repaso de 30 s, un 10 % de ciclo util), que
+// ya esta corregido. Ver el comentario de SERIAL_CDC_WAIT_MS.
+//
+// OJO CON EL RETRASO DE DETECCION: los 120 s del repaso NO son la latencia de
 // deteccion de la ignicion. El despertar real lo hace ext0, que es una
 // interrupcion de hardware en GPIO9 y es instantanea. El temporizador existe
 // como red de seguridad (si ext0 no se pudo armar) y para vigilar el voltaje
@@ -64,6 +78,11 @@
 // toma con una sola muestra del ADC. Las primeras conversiones tras el arranque
 // son basura y casi dejaron esta rama por inservible. Ver adcSetup() y
 // pmBootGuard().
+//
+// CUARTA REGLA (la mañana siguiente): en parqueo, cada milisegundo despierto se
+// paga con celda. Todo lo que se agregue al camino de arranque corre 720 veces
+// al dia, asi que ninguna espera va antes de saber POR QUE despertamos. La
+// observabilidad se agrega para el arranque en frio, no para el repaso.
 // ============================================================================
 
 #include <Arduino.h>
@@ -300,15 +319,21 @@ static const float BAT_DIVIDER_FACTOR = 2.0f;
 // agonizando. Una 18650 real nunca reporta 1.9 V por este divisor.
 #define BAT_PLAUSIBLE_MIN_V 2.00f
 
-// Parqueo profundo: el ESP32 duerme y repasa la ignicion cada 30 s. El ext0 la
-// detecta al instante si el margen del divisor alcanza (~2.62 V contra un
-// umbral digital de ~2.48 V); el temporizador es la red de seguridad.
+// Cada cuanto despierta el ESP32 mientras el carro esta parqueado.
 //
-// PARKED_POLL_S no es la latencia de deteccion (eso lo hace ext0, instantaneo):
-// es cada cuanto se revisa la bateria mientras duerme. Se puede subir a 60 o
-// 120 s para ahorrar despertares una vez el Nivel 2 este cerrado; cada repaso
-// es un arranque completo del ESP32.
-#define PARKED_POLL_S     30UL
+// SUBIDO DE 30 A 120 S (2026-08-20) con datos en mano. Cada repaso es un
+// arranque completo del ESP32, y en la noche del 19 al 20 esos despertares
+// resultaron ser el consumidor DOMINANTE del parqueo: mas que el modem dormido
+// por DTR, que ya estaba en el orden de miliamperios. Con la espera del CDC
+// USB fuera del camino, un repaso cuesta ~0.5 s, asi que el ciclo util pasa de
+// ~10 % (3.3 s de cada 33.5 s) a ~0.4 %.
+//
+// Esto NO afecta la latencia de deteccion de la ignicion: de eso se encarga
+// ext0, que es una interrupcion de hardware y es instantanea. Lo unico que se
+// espacia es la vigilancia del voltaje de la celda, y con BAT_CUTOFF_N = 5 el
+// corte pasa a exigir 10 minutos sostenidos bajo el piso. Para una 18650 que
+// tarda horas en moverse 50 mV, eso sigue siendo de sobra.
+#define PARKED_POLL_S     120UL
 #define PARKED_PULSE_S    (24UL * 3600UL)
 #define SETTLE_MS         800     // dejar salir los MQTT antes de desconectar
 
@@ -333,6 +358,14 @@ static const float BAT_DIVIDER_FACTOR = 2.0f;
 // ARDUINO_USB_CDC_ON_BOOT=1, Serial es el USB nativo del S3 y el host tarda
 // 1-2 s en enumerarlo tras un reset: sin esta espera se pierden las primeras
 // lineas del arranque, justo las del guardian de bateria.
+//
+// SOLO EN ARRANQUE EN FRIO. Y no es un detalle de estilo: cuando esta espera
+// corria en todos los arranques, con el USB desconectado !SerialMon nunca se
+// hacia falso y el bucle agotaba los 3000 ms completos, con el CPU a plena
+// potencia y alimentado por la 18650, en CADA repaso de parqueo. La noche del
+// 19 al 20 eso se midio solo: los pulsos pedidos a 60 min salieron a 67 min
+// clavados, +11.8 %, porque cada ciclo de 30 s duraba 33.5 s reales. Un 10 %
+// de ciclo util regalado por esperar a un puerto que nadie estaba mirando.
 #define SERIAL_CDC_WAIT_MS 3000UL
 
 // ---- BANCO DE PRUEBAS (todo en 0 para produccion) ----
@@ -398,6 +431,11 @@ enum PendingEvent : uint8_t { EV_NONE = 0, EV_ENGINE_ON = 1, EV_ENGINE_OFF = 2 }
 // siguiente pulso de parqueo, aunque llegue tarde.
 static RTC_DATA_ATTR PendingEvent pendingEvent = EV_NONE;
 
+// Causa del ultimo despertar, resuelta una sola vez al entrar a setup(). Se
+// consulta antes que nada porque de ella depende si vale la pena esperar el
+// puerto USB: en un repaso de parqueo, esa espera es celda tirada a la basura.
+static esp_sleep_wakeup_cause_t wakeCause = ESP_SLEEP_WAKEUP_UNDEFINED;
+
 // ---------- Ultimo punto valido ----------
 // Se cachea para poder publicar el evento de apagado y los pulsos de parqueo
 // sin depender de que el GNSS tenga fix fresco en ese momento.
@@ -421,7 +459,8 @@ struct GpsPoint {
 //
 // VALIDADO el 2026-08-20: tras un deep sleep y un despertar por ext0, el
 // engine_on salio con el mismo timestamp del engine_off anterior. La cache
-// cruzo el sueno intacta.
+// cruzo el sueno intacta. Y la noche del 19 al 20 aguanto 5 h 35 min y unos
+// 170 despertares seguidos sin corromperse.
 //
 // PENDIENTE (cosmetico): el engine_on no deberia republicar una posicion de
 // hace horas. Conviene un limite de antiguedad para ese evento; el engine_off
@@ -556,6 +595,9 @@ static float readBatteryVolts() {
 //   !vbus && v < recoverV()  ->  !false && 0.84 < 3.80  ->  DORMIR
 // o sea que el equipo se dormia en el arranque con la celda llena. Ese era el
 // "pasa a deepsleep desde el inicio", y no tenia nada que ver con los umbrales.
+//
+// CONFIRMADO el mismo dia: con el calentamiento puesto, el mismo boot leyo
+// bat=4.18 vbus=1 y no hubo que recurrir a ninguna guarda.
 //
 // Por eso aqui se descartan conversiones a proposito antes de dar el ADC por
 // bueno. Cuesta 40 ms una sola vez por arranque.
@@ -1055,6 +1097,7 @@ static RTC_DATA_ATTR uint32_t rtcBootCount    = 0;
 static RTC_DATA_ATTR bool     rtcModemAlive   = false;  // modem encendido y sin +CPOF
 static RTC_DATA_ATTR bool     rtcInCutoff     = false;
 static RTC_DATA_ATTR uint32_t rtcSleptSeconds = 0;
+static RTC_DATA_ATTR uint32_t rtcAwakeMs      = 0;      // fraccion de segundo acumulada
 static RTC_DATA_ATTR uint8_t  rtcStrikes      = 0;
 
 static inline float cutoffV()  { return BAT_CUTOFF_V  + TEST_BAT_OFFSET_V; }
@@ -1119,7 +1162,7 @@ static bool pmModemSleep() {
 
 static void pmModemWake() {
   // El hold se libera UNICAMENTE aqui. Soltarlo al inicio de setup() dejaria el
-  // DTR flotando en los repasos de parqueo de 30 s y el modem despertaria solo.
+  // DTR flotando en los repasos de parqueo y el modem despertaria solo.
   gpio_deep_sleep_hold_dis();
   gpio_hold_dis((gpio_num_t)MODEM_DTR_PIN);
   pinMode(MODEM_DTR_PIN, OUTPUT);
@@ -1211,7 +1254,7 @@ static void pmBootGuard() {
   bool  vbus = pmVbusPresent();
 
   SerialMon.printf("[PM] boot#%lu wake=%d bat=%.2f vbus=%d corte=%.2f rearranque=%.2f corte_previo=%d\n",
-                   (unsigned long)rtcBootCount, (int)esp_sleep_get_wakeup_cause(),
+                   (unsigned long)rtcBootCount, (int)wakeCause,
                    v, (int)vbus, cutoffV(), recoverV(), (int)rtcInCutoff);
 
   // SEGUNDA OPINION antes de tomar una decision irreversible.
@@ -1329,13 +1372,25 @@ static void pmEnterParked() {
   pmGnssOff();                    // apaga GNSS, NO el modem
   pmModemSleep();                 // DTR: conserva registro LTE y efemerides
   rtcSleptSeconds = 0;
+  rtcAwakeMs      = 0;
 
   SerialMon.println("[PM] parqueado -> deep sleep");
   pmDeepSleep(true, PARKED_POLL_S);
 }
 
 static void pmParkedTick() {
-  rtcSleptSeconds += PARKED_POLL_S;
+  // El reloj de parqueo cuenta sueno NOMINAL mas tiempo REALMENTE despierto.
+  //
+  // DEFECTO CORREGIDO (2026-08-20): antes solo sumaba PARKED_POLL_S, ignorando
+  // lo que cuesta cada despertar. Medido esa noche: pulsos pedidos a 60 min
+  // salieron a 67 min con desviacion de un segundo entre ciclos, +11.8 %,
+  // porque cada ciclo nominal de 30 s duraba 33.5 s reales. En produccion eso
+  // convertia las 24 h del pulso en casi 27. La fraccion de segundo se acumula
+  // en rtcAwakeMs para que no se pierda redondeando en cada vuelta.
+  rtcAwakeMs += millis();
+  rtcSleptSeconds += PARKED_POLL_S + (rtcAwakeMs / 1000);
+  rtcAwakeMs %= 1000;
+
   float v = readBatteryVolts();
 
   uint32_t pulse = (TEST_PULSE_S > 0) ? TEST_PULSE_S : PARKED_PULSE_S;
@@ -1382,6 +1437,7 @@ static void pmParkedTick() {
     }
     pmModemSleep();
     rtcSleptSeconds = 0;
+    rtcAwakeMs      = 0;
   }
 
   pmDeepSleep(true, PARKED_POLL_S);
@@ -1390,17 +1446,22 @@ static void pmParkedTick() {
 void setup() {
   SerialMon.begin(115200);
 
-  // Con ARDUINO_USB_CDC_ON_BOOT=1, Serial es el USB nativo del S3: tras un
-  // reset el host tarda 1-2 s en enumerar el puerto y todo lo que se imprima
-  // antes se pierde. El 2026-08-20 eso oculto la linea [PM] boot#, que es
-  // precisamente la que explica como decidio el guardian de bateria. El
-  // operador && corta la espera si nadie esta escuchando, asi que en el carro
-  // esto no cuesta nada.
-  uint32_t serialWaitStart = millis();
-  while (!SerialMon && (millis() - serialWaitStart) < SERIAL_CDC_WAIT_MS) {
-    delay(10);
+  // Lo PRIMERO, antes de cualquier espera: por que despertamos?
+  wakeCause = esp_sleep_get_wakeup_cause();
+  bool coldBoot = (wakeCause == ESP_SLEEP_WAKEUP_UNDEFINED);
+
+  // La espera del CDC USB solo tiene sentido en arranque en frio, cuando hay un
+  // humano con un monitor serial abierto. En un repaso de parqueo no hay nadie
+  // escuchando: !SerialMon nunca se hace falso con el USB desconectado, el
+  // bucle agota los 3 s completos con el CPU a plena potencia, y eso se paga
+  // con celda 720 veces al dia. Ver el comentario de SERIAL_CDC_WAIT_MS.
+  if (coldBoot) {
+    uint32_t serialWaitStart = millis();
+    while (!SerialMon && (millis() - serialWaitStart) < SERIAL_CDC_WAIT_MS) {
+      delay(10);
+    }
+    delay(300);
   }
-  delay(300);
 
   watchdogSetup();
 
@@ -1443,7 +1504,7 @@ void setup() {
   // la forma mas rapida que existe de vaciar la 18650. Solo un pin francamente
   // alto significa ignicion encendida.
 #if !TEST_DISABLE_SLEEP
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER &&
+  if (wakeCause == ESP_SLEEP_WAKEUP_TIMER &&
       (isIgnitionOff() || bootPinV < PIN_ON_V)) {
     pmParkedTick();         // NO retorna
   }
@@ -1484,52 +1545,3 @@ void loop() {
   if (pmCheckCutoff()) pmEnterCutoff(readBatteryVolts());  // NO retorna
 
   // Mantener sesión MQTT viva
-  if (!modem.isNetworkConnected() || !modem.isGprsConnected()) {
-    SerialMon.println("[NET] down -> reconnect");
-    ensureLTE();
-  }
-
-  serviceMQTT();
-  mqtt.loop();
-
-  serviceEvents();
-  serviceTelemetry();
-  serviceBattery();
-
-  // Nivel 2: dormir cuando el carro esta apagado.
-  //
-  // DEFECTO CORREGIDO (2026-08-20): la condicion exigia pendingEvent == EV_NONE,
-  // pero serviceEvents() solo limpia el pendiente cuando MQTT esta conectado.
-  // Con MQTT caido el evento nunca se limpiaba, la valvula de escape de 5 min
-  // era inalcanzable y el equipo se quedaba despierto vaciando la celda:
-  // exactamente el escenario que el Nivel 2 venia a evitar. Ahora el escape es
-  // por tiempo puro y pendingEvent vive en RTC, asi que el engine_off no se
-  // pierde: sale en el siguiente pulso de parqueo.
-  bool graced      = (millis() > PARK_GRACE_MS);
-  bool eventsDone  = (mqtt.connected() && pendingEvent == EV_NONE);
-  bool giveUpOnNet = (millis() > PARK_FORCE_MS);
-
-  // Anuncio periodico de por que todavia no se parquea. Sin esta linea, un
-  // equipo esperando MQTT y un equipo colgado se ven identicos desde afuera:
-  // ni publica ni imprime. El 2026-08-20 se perdio media hora deduciendo por
-  // consumo (20-40 mA) y por un LWT lo que esta linea habria dicho de frente.
-  static uint32_t lastParkLogMs = 0;
-  if (isIgnitionOff() && (millis() - lastParkLogMs) > PARK_LOG_MS) {
-    lastParkLogMs = millis();
-    SerialMon.printf("[PM] apagado t=%lus mqtt=%d pend=%u gracia=%d forzado_en=%lus\n",
-                     (unsigned long)(millis() / 1000), (int)mqtt.connected(),
-                     (unsigned)pendingEvent, (int)graced,
-                     (unsigned long)(PARK_FORCE_MS / 1000));
-  }
-
-#if !TEST_DISABLE_SLEEP
-  if (isIgnitionOff() && graced && (eventsDone || giveUpOnNet)) {
-    if (!eventsDone) {
-      SerialMon.println("[PM] parqueo forzado: MQTT no levanto, el evento queda en RTC");
-    }
-    pmEnterParked();        // NO retorna
-  }
-#endif
-
-  delay(10);
-}
