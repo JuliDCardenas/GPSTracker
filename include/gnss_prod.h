@@ -4,14 +4,18 @@
 // Proyecto GPS Tracker Logan · rama feat/low-power-nivel2 · 2026-08-22
 //
 // ESTE ARCHIVO NO ES INDEPENDIENTE. Es un pedazo de main.cpp que vive aparte
-// para que main.cpp no crezca mas. Se incluye UNA sola vez, desde main.cpp,
-// justo antes de readGpsPoint(). En ese punto ya estan declarados y por eso
-// aqui se usan sin declararlos:
+// para que main.cpp no siga creciendo. Se incluye UNA sola vez, desde main.cpp,
+// justo despues de la definicion de watchdogFeed(). En ese punto ya existen y
+// por eso aqui se usan sin declararlos:
 //
-//   modem, SerialMon, mqtt, lastValidPoint, watchdogFeed(),
+//   modem, SerialMon, watchdogFeed(),
 //   MODEM_GPS_ENABLE_GPIO, MODEM_GPS_ENABLE_LEVEL
 //
-// Si lo incluyes en otro punto o en otro .cpp, no compila. Es a proposito.
+// A proposito NO usa mqtt ni lastValidPoint, aunque los necesite logicamente.
+// Motivo: en main.cpp esos dos se declaran despues de tryConnectMQTT(), y
+// tryConnectMQTT() necesita la huella de build de aqui. Si el header dependiera
+// de ellos no habria ningun punto valido donde incluirlo. Todo lo que viene de
+// ese lado entra por parametro y la publicacion MQTT la hace main.cpp.
 //
 // ---------------------------------------------------------------------------
 // SEXTA REGLA DEL PROYECTO
@@ -80,8 +84,8 @@
 // F22 — parametros de la guardia de trama rancia
 // ---------------------------------------------------------------------------
 
-// Techo de reporte. El contador sube siempre; el log y la publicacion se
-// limitan para que un GNSS pegado no inunde el serial ni el broker.
+// Techo de reporte. El contador sube siempre; el log se limita para que un
+// GNSS pegado no inunde el serial.
 #define GNSS_STALE_LOG_MS 60000UL
 
 // ---------------------------------------------------------------------------
@@ -167,7 +171,7 @@ static bool gnssPwrOn() {
   modem.waitResponse(2000);
 #endif
 
-  SerialMon.printf("[GNSS] motor encendido en %lu ms (antes: hasta 610000 ms)\n",
+  SerialMon.printf("[GNSS] motor encendido en ~%lu ms (antes: hasta 610000 ms)\n",
                    (unsigned long)GNSS_SETTLE_MS);
   return true;
 }
@@ -180,11 +184,11 @@ static bool gnssPwrOn() {
 // punto valido, es decir, si el modem nos esta reciclando una solucion vieja.
 // Cuando devuelve true hay que descartar la lectura entera.
 //
-// Se compara contra lastValidPoint, que ya vive en RTC_DATA_ATTR, asi que la
-// referencia sobrevive al deep sleep sin necesidad de una variable nueva.
-static bool gnssFrameIsStale(const char *ts) {
-  if (!lastValidPoint.valid) return false;
-  if (strcmp(ts, lastValidPoint.ts) != 0) return false;
+// La referencia entra por parametro (lastValidPoint vive en RTC_DATA_ATTR en
+// main.cpp, asi que sobrevive al deep sleep sin variable nueva).
+static bool gnssFrameIsStale(const char *ts, bool lastValid, const char *lastTs) {
+  if (!lastValid) return false;
+  if (strcmp(ts, lastTs) != 0) return false;
 
   rtcGnssStale++;
 
@@ -194,11 +198,6 @@ static bool gnssFrameIsStale(const char *ts) {
     lastStaleLogMs = nowMs;
     SerialMon.printf("[GPS] trama rancia: marca %s repetida -> descartada (total=%u)\n",
                      ts, (unsigned)rtcGnssStale);
-    if (mqtt.connected()) {
-      char g[64];
-      snprintf(g, sizeof(g), "stale=%u,last=%s", (unsigned)rtcGnssStale, ts);
-      mqtt.publish(TOPIC_GNSS, g, true);
-    }
   }
   return true;
 }
@@ -235,13 +234,11 @@ static void gnssLogSpeedUnits(float speed) {
 }
 
 // ---------------------------------------------------------------------------
-// F16 — publicacion de la huella
+// F16 — cadena de la huella
 // ---------------------------------------------------------------------------
 //
-// Retenido: al suscribirse llega de una, sin esperar el siguiente arranque y
-// sin abrir el monitor serial.
-static void gnssPublishFwFootprint() {
-  char fw[96];
-  snprintf(fw, sizeof(fw), "%s %s,%s", FW_NAME, FW_VERSION, FW_BUILD);
-  mqtt.publish(TOPIC_FW, fw, true);
+// Arma el texto; publicar es cosa de main.cpp, que es quien tiene el cliente
+// MQTT a la vista.
+static void gnssFwString(char *buf, size_t n) {
+  snprintf(buf, n, "%s %s,%s", FW_NAME, FW_VERSION, FW_BUILD);
 }
