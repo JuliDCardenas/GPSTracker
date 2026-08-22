@@ -3,120 +3,21 @@
 //
 // Telemetria GNSS por LTE hacia MQTT + sense de ignicion por ADC en GPIO9.
 //
-// El estado de la ignicion gobierna la cadencia de publicacion:
-//   IGN_ON  en marcha  -> cada GPS_PERIOD_MS        (5 s)
-//   IGN_ON  en ralenti -> cada IDLE_PERIOD_MS       (30 s)
-//   IGN_OFF parqueado  -> engine_off y luego deep sleep (Nivel 2): repaso de
-//                         ignicion cada 120 s y un pulso de bateria/posicion al dia
+// LA HISTORIA DEL PROYECTO Y LAS SIETE REGLAS VIVEN EN docs/HISTORIA-FIRMWARE.md
 //
-// Y ademas genera dos eventos discretos en las transiciones: engine_on y
-// engine_off. El de apagado se publica con la ultima posicion valida guardada
-// en la cache, de modo que el "aqui quedo parqueado" sale aunque el GNSS no
-// tenga fix fresco en ese instante.
+// No es documentacion decorativa: ahi esta el por que de casi cada decision
+// rara de este archivo, con las mediciones que la respaldan. Antes de "limpiar"
+// algo de aqui, buscalo alla. Se movio el 2026-08-22 porque este archivo llego
+// a 67 KB y ya no se podia reescribir de una sola pasada.
 //
-// NIVEL 1 DE AHORRO DE ENERGIA: aqui no duerme nada (ni el ESP32, ni el modem,
-// ni el GNSS). Lo unico que baja es la cadencia de publicacion. Se eligio asi
-// porque con este stack (TinyGSM + PubSubClient + LTE) volver a despertar
-// cuesta 30-60 s de re-attach a plena potencia: pulso de PWRKEY, waitForNetwork,
-// gprsConnect, mqtt.connect y el TTFF del GNSS (sin A-GNSS, porque AT+CAGPS da
-// ERROR en el firmware B05V01_241206). Con intervalos cortos, dormir sale mas
-// caro que quedarse despierto.
+// El archivo esta partido asi:
+//   src/main.cpp                -> configuracion, ADC, ignicion, red, MQTT
+//   include/gnss_prod.h         -> motor GNSS: encendido, trama rancia, TTFF
+//   include/tracker_telemetry.h -> lectura del GNSS y publicacion
+//   include/tracker_pm.h        -> Nivel 2 y corte por bajo voltaje
 //
-// CORRECCION DE ESA NOTA (2026-08-22): lo de AT+CAGPS quedo mal escrito. El
-// comando NO da ERROR: contesta OK. Lo que pasa es que el laboratorio GNSS lo
-// midio y empeoro el TTFF de 22 s a 192 s, y ademas AT+CAGPS ni siquiera es el
-// comando documentado para esta familia (el manual V1.02 lista AT+CGNSSAGPS en
-// el capitulo 21.2.23, y advierte que puede contestar OK habiendo fallado, con
-// el motivo real en un URC aparte). A-GNSS queda PENDIENTE DE PRUEBA con el
-// comando correcto, no descartado.
-//
-// MEDIDO (noche del 2026-08-17 al 18, 8 h 22 min parqueado con keepalive de
-// 20 min): 25 de 25 keepalives entregados, cero reconexiones MQTT, y la 18650
-// bajo de ~4.11 V a 3.79 V, unos 38 mV/h. Autonomia estimada del Nivel 1:
-// 15-18 h. Con solo 25 transmisiones en 8 horas, el intervalo del keepalive es
-// irrelevante para el consumo: lo que cuesta es tener el modem enganchado y el
-// GNSS encendido. El siguiente salto real es el Nivel 2 (AT+CGNSSPWR=0 entre
-// keepalives y modem dormido por DTR), no publicar menos seguido.
-//
-// NIVEL 2 DE AHORRO DE ENERGIA: parqueado, el firmware publica el engine_off,
-// apaga el GNSS (AT+CGNSSPWR=0), duerme el modem por DTR (AT+CSCLK=1; conserva
-// el registro LTE y las efemerides) y pone el ESP32 en deep sleep. Despierta
-// por ext0 si la ignicion sube y, como red de seguridad, cada 120 s por
-// temporizador. Una vez al dia (PARKED_PULSE_S) despierta el modem, publica
-// bateria + posicion y vuelve a dormir. El corte por bajo voltaje
-// (BAT_CUTOFF_V, con histeresis BAT_RECOVER_V) apaga TODO con AT+CPOF y solo
-// rearma con la celda recuperada o con VBUS presente. El guardian de arranque
-// bloquea cualquier boot sin VBUS por debajo del corte, sin encender el
-// modem: eso mata el bucle de brownout del 2026-08-18 (10 reconexiones en
-// 108 s, muerte a 2.37 V).
-//
-// MEDIDO (noche del 2026-08-19 al 20, 5 h 35 min parqueado con TEST_PULSE_S de
-// una hora): 5 de 5 pulsos entregados, cache de posicion y contadores RTC
-// intactos toda la noche, y la 18650 bajo de 4.15 V a 4.10 V en 4 h 28 min,
-// unos 11.2 mV/h contra los 38 mV/h del Nivel 1.
-//
-// OJO AL LEER ESA CIFRA: 4.19-4.10 V es la zona mas plana de la curva de la
-// 18650, asi que en mV/h el Nivel 2 se ve mejor de lo que es. Traducido a
-// capacidad son ~1.25 %/h contra ~2.87 %/h del Nivel 1: una mejora real de
-// 2.3x, no de 3.4x. La medicion honesta pide dejarla correr hasta 3.80 V.
-//
-// Y esa noche todavia cargaba el desperdicio de la espera del CDC USB (3.3 s
-// de CPU a plena potencia en cada repaso de 30 s, un 10 % de ciclo util), que
-// ya esta corregido. Ver el comentario de SERIAL_CDC_WAIT_MS.
-//
-// ENTREGADO A MQTT NO ES ENTREGADO A TRACCAR (leccion del 2026-08-20, por la
-// mañana): esos 5 pulsos si estaban en el broker, pero el subscriber los tiro
-// todos con "Skip: no_move_0.0m" y la noche entera quedo invisible en el mapa.
-// El CSV decia ignition=1 porque ignState no sobrevivia al deep sleep, y sin
-// ignition=0 no hay bypass del filtro de movimiento. Una prueba de campo no
-// termina en mosquitto_sub: termina en el log del contenedor. Ver ignState y
-// pmParkedTick().
-//
-// OJO CON EL RETRASO DE DETECCION: los 120 s del repaso NO son la latencia de
-// deteccion de la ignicion. El despertar real lo hace ext0, que es una
-// interrupcion de hardware en GPIO9 y es instantanea. El temporizador existe
-// como red de seguridad (si ext0 no se pudo armar) y para vigilar el voltaje
-// de la celda mientras duerme. Al encender el carro, lo que se demora son el
-// antirrebote (3 s) y el re-attach de LTE+MQTT (~5-15 s), no el sondeo.
-//
-// REGLA DE ORO DEL NIVEL 2 (aprendida a golpes, 2026-08-20): de esta funcion
-// no se sale nunca sin una fuente de despertar armada. Un deep sleep sin ext0
-// y sin temporizador no es un ahorro de energia, es un ladrillo que solo revive
-// desconectando la bateria. Ver pmDeepSleep().
-//
-// SEGUNDA REGLA (misma noche, mismo precio): si el firmware puede quedarse
-// varios minutos sin publicar y sin imprimir, entonces un cuelgue y una espera
-// normal se ven EXACTAMENTE igual, y se depura a ciegas adivinando. Todo estado
-// que dure mas de unos segundos tiene que anunciarse. Ver el log periodico del
-// loop y TEST_DISABLE_SLEEP.
-//
-// TERCERA REGLA (la que costo toda la noche): ninguna decision irreversible se
-// toma con una sola muestra del ADC. Las primeras conversiones tras el arranque
-// son basura y casi dejaron esta rama por inservible. Ver adcSetup() y
-// pmBootGuard().
-//
-// CUARTA REGLA (la mañana siguiente): en parqueo, cada milisegundo despierto se
-// paga con celda. Todo lo que se agregue al camino de arranque corre cientos de
-// veces al dia, asi que ninguna espera va antes de saber POR QUE despertamos.
-// La observabilidad se agrega para el arranque en frio, no para el repaso.
-//
-// QUINTA REGLA (media hora despues de la cuarta): todo estado del que dependa
-// una publicacion tiene que vivir en RTC_DATA_ATTR o recalcularse en el
-// despertar. Un deep sleep no es una pausa: es un reset con memoria selectiva,
-// y las variables normales vuelven a su valor inicial. Ver ignState.
-//
-// SEXTA REGLA (2026-08-22, laboratorio GNSS): que una libreria devuelva false
-// no significa que la operacion haya fallado. modem.enableGPS() reportaba
-// fracaso durante DIEZ MINUTOS en cada arranque mientras el GNSS ya estaba
-// encendido y contestando: se quedaba esperando un URC que este firmware no
-// emite nunca. Antes de reintentar veinte veces hay que comprobar en el banco
-// que la operacion de verdad fracaso. Ver pmGnssOn().
-//
-// SEPTIMA REGLA (misma sesion): una lectura con buenos numeros no es una
-// lectura NUEVA. El modem puede devolver la ultima solucion GNSS guardada, con
-// mas satelites y mejor HDOP que la real, y ningun filtro de calidad la
-// distingue. Lo unico que delata a una trama vieja es que su marca de tiempo no
-// avanzo. Ver readGpsPoint().
+// Los tres headers NO son independientes: son pedazos de este archivo y solo
+// compilan incluidos desde aqui, en el orden en que aparecen mas abajo.
 // ============================================================================
 
 #include <Arduino.h>
@@ -173,16 +74,6 @@
 HardwareSerial SerialAT(1);
 TinyGsm modem(SerialAT);
 
-// ---------- Huella de build (F16) ----------
-// Saber QUE esta corriendo en la placa sin tener que adivinar. El 2026-08-22 se
-// perdio tiempo justamente por eso: "commiteado" no es "flasheado", y con cinco
-// versiones del laboratorio en una mañana era imposible saber cual estaba
-// arriba. Se publica RETENIDO, asi que basta suscribirse al topic para saber
-// que firmware corre, aunque el equipo lleve horas dormido.
-#define FW_NAME    "tracker"
-#define FW_VERSION "2.1"
-static const char FW_BUILD[] = __DATE__ " " __TIME__;
-
 // ---------- Identidad del dispositivo ----------
 // APN, APN_USER, APN_PASS, MQTT_HOST, MQTT_PORT, MQTT_USER y MQTT_PASS
 // se definen en include/secrets.h
@@ -193,13 +84,6 @@ const char TOPIC_TELEMETRY[] = "tracker/Lilygo/telemetria";
 // Topics de sistema (bajo volumen, QoS 1 / retained donde aplica)
 const char TOPIC_LWT[]    = "tracker/Lilygo/sys/lwt";
 const char TOPIC_STATUS[] = "tracker/Lilygo/sys/status";
-const char TOPIC_FW[]     = "tracker/Lilygo/sys/fw";
-
-// Forense del GNSS: contador de tramas rancias descartadas. Retenido y de muy
-// bajo volumen (solo se publica cuando el contador se mueve, y como maximo una
-// vez por minuto). Si este topic crece en campo, el defecto de la trama vieja
-// esta pasando de verdad y no solo en el banco.
-const char TOPIC_GNSS[]   = "tracker/Lilygo/sys/gnss";
 
 // Estado de ignicion retenido, mismo contrato que usaban los firmwares de
 // prueba adc_sense_wifi / adc_sense_field, para no romper lo que ya escuche n8n.
@@ -440,48 +324,15 @@ static const float BAT_DIVIDER_FACTOR = 2.0f;
 // bateria, LTE y MQTT con el serial vivo. Volver a 0 para probar el parqueo.
 #define TEST_DISABLE_SLEEP 0
 
-// ---------- Encendido del motor GNSS ----------
-// Techo de respuesta de AT+CGNSSPWR=1. Medido en banco: contesta OK en 70 ms.
-// Diez segundos son de sobra y no se parecen en nada a los 30 s que esperaba
-// la libreria por un URC inexistente.
-#define GNSS_PWR_TIMEOUT_MS 10000UL
-
-// Cuanto tarda el motor en quedar operativo despues del OK. Medido en las tres
-// corridas del laboratorio: a los ~2 s ya responde AT+CGNSSINFO.
-#define GNSS_SETTLE_MS      2000UL
-
-// Intentos de encendido. Antes eran 20 x 30 s = mas de diez minutos. Ahora dos
-// intentos de 10 s como maximo, y si no enciende se sigue sin GNSS igual que
-// antes: el tracker todavia sirve para bateria, ignicion y ultima posicion.
-#define GNSS_PWR_ATTEMPTS   2
-
-// 1 = reescribe AT+CGNSSMODE y AT+CGNSSIPR en cada arranque.
-//
-// Se deja en 0 con datos: ambos comandos son SAVE-persistentes en la NVRAM del
-// modem, y el laboratorio del 2026-08-22 encontro CGNSSMODE en 15 en TODAS las
-// corridas -incluidas las que venian de AT+CPOF y de AT+CRESET-. Reescribirlo
-// en cada boot no aporta determinismo y el manual le da hasta 10 s de tiempo de
-// respuesta a cada uno. En su lugar se consulta y queda en el log, que con
-// TINY_GSM_DEBUG activo se imprime solo.
-#define GNSS_FORCE_MODE     0
-
-// Cada cuanto, como maximo, se reporta una trama rancia. Son raras, pero si el
-// motor se queda pegado en la solucion vieja sondeamos cada 5 s y no tiene
-// sentido llenar el log ni el broker.
-#define GNSS_STALE_LOG_MS   60000UL
-
 // ---------- Validación GNSS ----------
 // PENDIENTE: verificar la unidad real que entrega AT+CGNSSINFO. La evidencia
 // de campo (Traccar coincide con el odómetro del vehículo) apunta a que el
 // módem reporta NUDOS y no km/h, por lo que este umbral estaría filtrando en
 // realidad a ~333 km/h. No cambiar hasta confirmarlo con más mediciones.
 //
-// INSTRUMENTADO EL 2026-08-22 (F20): readGpsPoint() ahora imprime la velocidad
-// cruda y sus dos interpretaciones posibles cada vez que hay movimiento. Con
-// una prueba de manejo y el velocimetro al lado, esto se cierra solo. NO se
-// cambia el CSV: el protocolo OsmAnd de Traccar espera nudos, asi que si el
-// modem entrega nudos el pipeline actual esta bien por accidente y tocarlo a
-// ciegas romperia lo que hoy funciona.
+// El 2026-08-22 se agrego instrumentacion para cerrarlo: gnssLogSpeedUnits()
+// imprime la velocidad cruda con las dos interpretaciones, para compararla
+// contra el velocimetro en una prueba de manejo. El CSV sigue intacto.
 static const float MAX_VALID_SPEED_KMH = 180.0f;
 static const float MIN_VALID_ALTITUDE_M = -9990.0f;
 static const int MIN_VALID_SATELLITES = 5;
@@ -575,28 +426,14 @@ struct GpsPoint {
 // cruzo el sueno intacta. Y la noche del 19 al 20 aguanto 5 h 35 min y unos
 // 600 despertares seguidos sin corromperse.
 //
-// Y desde el 2026-08-22 cumple una SEGUNDA funcion: su campo ts es la
-// referencia contra la que readGpsPoint() detecta las tramas rancias. Por eso
-// tiene que seguir viviendo en RTC aunque algun dia se quite la cache: si se
-// pierde entre suenos, el guardia arranca ciego en cada despertar, que es
-// justo el momento en que el modem devuelve la solucion vieja.
+// Y ADEMAS es la referencia del guardia de trama rancia (F22): el campo .ts de
+// aqui es contra lo que se compara cada lectura nueva del GNSS. Que ya viviera
+// en RTC es lo que permitio implementar el guardia sin variables nuevas.
 //
 // PENDIENTE (cosmetico): el engine_on no deberia republicar una posicion de
 // hace horas. Conviene un limite de antiguedad para ese evento; el engine_off
 // si la quiere siempre, porque es el "aqui quedo parqueado".
 static RTC_DATA_ATTR GpsPoint lastValidPoint = {};
-
-// Contador de tramas rancias descartadas. En RTC para que sobreviva a los
-// cientos de despertares del parqueo: si el defecto aparece de madrugada, el
-// numero tiene que seguir ahi por la mañana.
-static RTC_DATA_ATTR uint16_t rtcGnssStale = 0;
-
-// Cronometro del TTFF real en produccion. Se arma cuando pmGnssOn() enciende el
-// motor y se desarma con el primer fix fresco. No va en RTC a proposito: mide
-// un encendido concreto, no una acumulacion.
-static uint32_t gnssOnAtMs = 0;
-static bool     gnssTtffPending = false;
-
 static uint32_t lastMovementMs = 0;
 static uint32_t lastPublishMs = 0;
 static uint32_t lastBatteryMs = 0;
@@ -673,6 +510,13 @@ static void watchdogSetup() {
 static void watchdogFeed() {
   esp_task_wdt_reset();
 }
+
+// ---------- Motor GNSS ----------
+// Encendido del GNSS, guardia de trama rancia, cronometro de TTFF y huella de
+// build. Va AQUI y no arriba porque usa modem, SerialMon, watchdogFeed() y los
+// defines de pines, y a la vez tiene que estar disponible para tryConnectMQTT()
+// (huella de build) y para readGpsPoint() (guardia), que vienen despues.
+#include "gnss_prod.h"
 
 // ---------- Helpers ----------
 static String buildClientId() {
@@ -918,6 +762,12 @@ static void restartModem() {
   watchdogFeed();
   waitForAT();
   ensureLTE();
+
+  // PENDIENTE (2026-08-22): tras un restart del modem el GNSS queda apagado y
+  // nadie vuelve a llamar pmGnssOn(). El tracker sigue publicando bateria,
+  // ignicion y la ultima posicion cacheada, pero no vuelve a tener fix fresco
+  // hasta el siguiente arranque del ESP32. No se arregla hoy para no meter
+  // cambios sin probar en el camino de recuperacion.
 }
 
 // Intento único de conexión MQTT. No bloquea el loop.
@@ -970,4 +820,283 @@ static bool tryConnectMQTT() {
       TOPIC_LWT,
       1,      // QoS 1 para el will
       true,   // retained
-      LWT_OFFL
+      LWT_OFFLINE);
+
+  if (ok) {
+    SerialMon.println("OK");
+    mqtt.publish(TOPIC_LWT, LWT_ONLINE, true);
+
+    // F16 (2026-08-22) - HUELLA DE BUILD, retenida.
+    //
+    // "Commiteado" no es "flasheado". Esta rama perdio tiempo dos veces por
+    // analizar el comportamiento de un binario viejo creyendo que era el nuevo.
+    // Con esto, un solo mosquitto_sub a tracker/Lilygo/sys/fw dice exactamente
+    // que firmware esta corriendo, sin abrir el monitor serial y sin esperar el
+    // siguiente arranque. La fecha y hora las pone el compilador, asi que no
+    // hay forma de que mienta.
+    char fwbuf[96];
+    gnssFwString(fwbuf, sizeof(fwbuf));
+    mqtt.publish(TOPIC_FW, fwbuf, true);
+
+    // TOPIC_STATUS es retained: el último publicado es el que queda en el
+    // broker. Por eso "boot" se publica aquí, en la primera conexión de la
+    // sesión, y no después en setup(), donde sobrescribiría el estado real.
+    //
+    // Sirve de forense: si despues de una noche corriendo el retained sigue en
+    // "boot", no hubo ni una reconexion MQTT desde el arranque; si dice
+    // "mqtt_reconnected", hubo caidas de enlace pero el firmware sobrevivio.
+    // bootStatusPublished vive en RTC_DATA_ATTR precisamente para que este
+    // forense no se autodestruya con los despertares del Nivel 2.
+    // Verificado en la noche del 2026-08-17 al 18: amanecio en "boot" tras
+    // 8 h 22 min y 25 keepalives sin perder uno. Y el 2026-08-20 sirvio para
+    // probar que un despertar por ext0 salio de deep sleep y no de un reset:
+    // publico "mqtt_reconnected", o sea que la RTC memory sobrevivio.
+    publishStatus(bootStatusPublished ? "mqtt_reconnected" : "boot");
+    bootStatusPublished = true;
+
+#if IGNITION_SENSE_ENABLED
+    // Reafirma el estado de ignicion al reconectar, por si el retained del
+    // broker quedo viejo tras una caida larga.
+    if (ignState != IGN_UNKNOWN) {
+      mqtt.publish(TOPIC_IGNITION, (ignState == IGN_ON) ? "on" : "off", true);
+    }
+#endif
+
+    mqttFailCount = 0;
+    mqttRetryDelayMs = MQTT_RETRY_BASE_MS;
+    return true;
+  }
+
+  SerialMon.print("FAIL state=");
+  SerialMon.println(mqtt.state());
+  return false;
+}
+
+// Gestiona reconexión con backoff y escalamiento de recuperación.
+static void serviceMQTT() {
+  if (mqtt.connected()) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if (now < mqttNextAttemptMs) {
+    return;
+  }
+
+  if (tryConnectMQTT()) {
+    return;
+  }
+
+  mqttFailCount++;
+  SerialMon.printf("[MQTT] fallos consecutivos=%u\n", mqttFailCount);
+
+  if (mqttFailCount == MQTT_FAILS_BEFORE_LTE_RECONNECT) {
+    SerialMon.println("[MQTT] escalando -> reconectar LTE");
+    ensureLTE();
+  } else if (mqttFailCount == MQTT_FAILS_BEFORE_MODEM_RESTART) {
+    SerialMon.println("[MQTT] escalando -> reiniciar modem");
+    restartModem();
+  } else if (mqttFailCount >= MQTT_FAILS_BEFORE_ESP_RESTART) {
+    SerialMon.println("[MQTT] escalando -> reiniciar ESP32");
+    delay(200);
+    ESP.restart();
+  }
+
+  // Backoff exponencial acotado
+  mqttRetryDelayMs = mqttRetryDelayMs * 2;
+  if (mqttRetryDelayMs > MQTT_RETRY_MAX_MS) {
+    mqttRetryDelayMs = MQTT_RETRY_MAX_MS;
+  }
+  mqttNextAttemptMs = millis() + mqttRetryDelayMs;
+}
+
+// ---------- Telemetria ----------
+// readGpsPoint(), rememberPoint(), publishPoint(), serviceEvents(),
+// serviceTelemetry() y serviceBattery(). Va despues de serviceMQTT() porque usa
+// mqtt, currentPeriodMs(), ignitionField() y los validadores de arriba.
+#include "tracker_telemetry.h"
+
+// ---------- Nivel 2 y corte por bajo voltaje ----------
+// Todo el bloque pm*: deep sleep, sueno del modem por DTR, guardian de
+// arranque, corte por bajo voltaje y ciclo de parqueo. Va al final porque usa
+// publishPoint() y serviceEvents() del header anterior.
+#include "tracker_pm.h"
+
+void setup() {
+  SerialMon.begin(115200);
+
+  // Lo PRIMERO, antes de cualquier espera: por que despertamos?
+  wakeCause = esp_sleep_get_wakeup_cause();
+  bool coldBoot = (wakeCause == ESP_SLEEP_WAKEUP_UNDEFINED);
+
+  // La espera del CDC USB solo tiene sentido en arranque en frio, cuando hay un
+  // humano con un monitor serial abierto. En un repaso de parqueo no hay nadie
+  // escuchando: !SerialMon nunca se hace falso con el USB desconectado, el
+  // bucle agota los 3 s completos con el CPU a plena potencia, y eso se paga
+  // con celda cientos de veces al dia. Ver el comentario de SERIAL_CDC_WAIT_MS.
+  if (coldBoot) {
+    uint32_t serialWaitStart = millis();
+    while (!SerialMon && (millis() - serialWaitStart) < SERIAL_CDC_WAIT_MS) {
+      delay(10);
+    }
+    delay(300);
+  }
+
+  watchdogSetup();
+
+  // F16: primera linea util del log. Si esto no coincide con lo que acabas de
+  // compilar, no sigas depurando: la placa esta corriendo otro binario.
+  SerialMon.printf("[FW] %s %s  build %s\n", FW_NAME, FW_VERSION, FW_BUILD);
+
+#if TEST_DISABLE_SLEEP
+  SerialMon.println("[PM] *** TEST_DISABLE_SLEEP=1: no se dormira nunca (modo banco) ***");
+#endif
+
+  // OBLIGATORIO antes de pmBootGuard(): configura la atenuacion Y calienta el
+  // ADC descartando las primeras conversiones. Sin esto el guardian decide
+  // sobre ruido y duerme el equipo con la celda llena (banco 2026-08-20).
+  adcSetup();
+
+  pmBootGuard();            // si la celda esta bajo el piso, duerme aqui mismo
+
+  // Arranca el reloj del ralenti desde el boot. Sin esto, un vehiculo encendido
+  // que nunca supera MOVING_SPEED_KMH se queda para siempre en cadencia rapida.
+  lastMovementMs = millis();
+
+  // Lectura informativa de arranque. El estado real se resuelve en el loop con
+  // su antirrebote: hasta entonces IGN_UNKNOWN se comporta como encendido.
+  float bootPinV = readPinVolts();
+  SerialMon.printf("[IGN] boot pin=%.3fV vbus=%.2fV (sense %s)\n",
+                   bootPinV, bootPinV * DIVIDER_FACTOR,
+                   IGNITION_SENSE_ENABLED ? "activo" : "desactivado");
+  SerialMon.printf("[BAT] boot %.2fV\n", readBatteryVolts());
+
+  // Contador de tramas rancias descartadas, acumulado desde el ultimo corte de
+  // energia. Si esto crece solo, el modem esta reciclando soluciones viejas.
+  if (rtcGnssStale > 0) {
+    SerialMon.printf("[GNSS] tramas rancias descartadas hasta ahora: %u\n",
+                     (unsigned)rtcGnssStale);
+  }
+
+  // Solo abre el UART. No enciende nada: el repaso de parqueo debe poder
+  // decidir y volver a dormir sin tocar el modem.
+  SerialAT.begin(MODEM_BAUDRATE, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
+
+  // Despertar por temporizador sin ignicion = seguir parqueado.
+  //
+  // La decision se toma del PIN, no del estado: ignState ya viaja en RTC
+  // (arranca en IGN_OFF si venimos de un parqueo), pero un reset de hardware o
+  // un brownout la borran, y el mundo fisico -el pin- siempre es la fuente de
+  // verdad. isIgnitionOff() esta en la condicion para cubrir el banco
+  // (TEST_FORCE_PARKED), donde el pin esta alto por el VBUS de la fuente.
+  //
+  // El umbral es PIN_ON_V y no PIN_OFF_V a proposito: con el corte anterior, un
+  // pin en zona media (0.6-2.5 V, divisor sucio o cap descargandose) disparaba
+  // un arranque completo con modem + LTE + MQTT + GNSS en cada repaso, que es
+  // la forma mas rapida que existe de vaciar la 18650. Solo un pin francamente
+  // alto significa ignicion encendida.
+#if !TEST_DISABLE_SLEEP
+  if (wakeCause == ESP_SLEEP_WAKEUP_TIMER &&
+      (isIgnitionOff() || bootPinV < PIN_ON_V)) {
+    pmParkedTick();         // NO retorna
+  }
+#endif
+
+  // Despertamos con la ignicion arriba (ext0) o es un arranque en frio: el
+  // estado que quedo en RTC ya no describe el mundo. Se vuelve a IGN_UNKNOWN
+  // para que el antirrebote del loop lo resuelva desde cero y publique su
+  // engine_on cuando corresponda.
+  if (!coldBoot && wakeCause != ESP_SLEEP_WAKEUP_TIMER) {
+    ignState = IGN_UNKNOWN;
+  }
+
+  // PWRKEY solo si el modem estaba apagado de verdad: pulsarlo con el modem
+  // encendido lo APAGA.
+  pmModemResume();
+
+  // 1) LTE up
+  ensureLTE();
+
+  // 2) MQTT up (primer intento; el loop se encarga de reintentar).
+  //    El status "boot" lo publica tryConnectMQTT() al conectar.
+  //    Ver la nota de tryConnectMQTT(): este primer intento falla de forma
+  //    reproducible con state=-4 y conecta en el reintento del loop.
+  tryConnectMQTT();
+
+  // 3) GPS on
+  //
+  // Antes del 2026-08-22 esta llamada se tomaba MAS DE DIEZ MINUTOS esperando
+  // un URC que este firmware no emite, con el loop() sin correr en todo ese
+  // rato: sin muestreo de ignicion, sin reintentos de MQTT y sin una sola
+  // publicacion. Ahora vuelve en ~2 s. Ver la SEXTA REGLA en
+  // docs/HISTORIA-FIRMWARE.md.
+  SerialMon.println("Enabling GPS...");
+  if (pmGnssOn()) {
+    SerialMon.println("GPS Enabled");
+  }
+}
+
+void loop() {
+  watchdogFeed();
+
+  // El sense va de primero y en cada vuelta. El loop gira cada ~10 ms, asi que
+  // la cadencia efectiva del ADC es mejor que IGN_SAMPLE_MS salvo cuando una
+  // llamada bloqueante (waitForNetwork, mqtt.connect, getGPS) se toma el hilo.
+  // No hace falta un segundo nucleo: 32 muestras cada 250 ms son microsegundos
+  // de CPU, y repartir esto entre cores obligaria a sincronizar el estado con
+  // el cliente MQTT, que no es thread-safe.
+  serviceIgnition();
+
+  // Corte por bajo voltaje: vigila en cada vuelta (muestrea cada 10 s).
+  if (pmCheckCutoff()) pmEnterCutoff(readBatteryVolts());  // NO retorna
+
+  // Mantener sesion MQTT viva
+  if (!modem.isNetworkConnected() || !modem.isGprsConnected()) {
+    SerialMon.println("[NET] down -> reconnect");
+    ensureLTE();
+  }
+
+  serviceMQTT();
+  mqtt.loop();
+
+  serviceEvents();
+  serviceTelemetry();
+  serviceBattery();
+
+  // Nivel 2: dormir cuando el carro esta apagado.
+  //
+  // DEFECTO CORREGIDO (2026-08-20): la condicion exigia pendingEvent == EV_NONE,
+  // pero serviceEvents() solo limpia el pendiente cuando MQTT esta conectado.
+  // Con MQTT caido el evento nunca se limpiaba, la valvula de escape de 5 min
+  // era inalcanzable y el equipo se quedaba despierto vaciando la celda:
+  // exactamente el escenario que el Nivel 2 venia a evitar. Ahora el escape es
+  // por tiempo puro y pendingEvent vive en RTC, asi que el engine_off no se
+  // pierde: sale en el siguiente pulso de parqueo.
+  bool graced      = (millis() > PARK_GRACE_MS);
+  bool eventsDone  = (mqtt.connected() && pendingEvent == EV_NONE);
+  bool giveUpOnNet = (millis() > PARK_FORCE_MS);
+
+  // Anuncio periodico de por que todavia no se parquea. Sin esta linea, un
+  // equipo esperando MQTT y un equipo colgado se ven identicos desde afuera:
+  // ni publica ni imprime. El 2026-08-20 se perdio media hora deduciendo por
+  // consumo (20-40 mA) y por un LWT lo que esta linea habria dicho de frente.
+  static uint32_t lastParkLogMs = 0;
+  if (isIgnitionOff() && (millis() - lastParkLogMs) > PARK_LOG_MS) {
+    lastParkLogMs = millis();
+    SerialMon.printf("[PM] apagado t=%lus mqtt=%d pend=%u gracia=%d forzado_en=%lus\n",
+                     (unsigned long)(millis() / 1000), (int)mqtt.connected(),
+                     (unsigned)pendingEvent, (int)graced,
+                     (unsigned long)(PARK_FORCE_MS / 1000));
+  }
+
+#if !TEST_DISABLE_SLEEP
+  if (isIgnitionOff() && graced && (eventsDone || giveUpOnNet)) {
+    if (!eventsDone) {
+      SerialMon.println("[PM] parqueo forzado: MQTT no levanto, el evento queda en RTC");
+    }
+    pmEnterParked();        // NO retorna
+  }
+#endif
+
+  delay(10);
+}
