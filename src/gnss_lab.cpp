@@ -1,77 +1,87 @@
 // =============================================================================
-//  GPS Tracker Logan  ·  GNSS LAB v1.3  ·  src/gnss_lab.cpp  ·  env: gnss_lab
+//  GPS Tracker Logan  ·  GNSS LAB v1.4  ·  src/gnss_lab.cpp  ·  env: gnss_lab
 // =============================================================================
-//  SEGUNDA PASADA. La v1.2 dejo dos cosas mal y una a medias.
+//  TERCERA PASADA. La v1.3 se corto en el arranque: la red no subio y sin red
+//  T9 (A-GNSS) no mide nada. Dos arreglos, y el segundo vale mas que el primero.
 //
-//  1. LA SONDA DE ARRANQUE DABA UN FALSO NEGATIVO.
-//     La v1.2 imprimio al arrancar:
-//        [LAB ] soporte de comandos de arranque: CGPSHOT=no CGPSWARM=no CGPSCOLD=no
-//     y eso NO significa que el firmware no los tenga. Dos errores encadenados:
+//  1. FALTABA AT+NETOPEN. Esto mato a la v1.3.
+//     El log decia:
+//        [AT ] > AT+IPADDR
+//        [AT ] < | +IP ERROR: Network not opened | ERROR |
+//     y despues de un AT+CGACT=1,1 seguia igual. La causa es que SIMCOM tiene
+//     DOS capas separadas y la v1.3 solo levantaba la primera:
+//        - contexto PDP        -> AT+CGACT=1,1   (capa 3GPP)
+//        - servicio de sockets -> AT+NETOPEN     (pila TCP/IP propia de SIMCOM)
+//     AT+IPADDR pregunta por la SEGUNDA. Sin NETOPEN siempre contesta
+//     "Network not opened", tenga o no tenga contexto activo. Manual SIM767XX
+//     V1.02, 13.2.1 (NETOPEN) y 13.2.7 (IPADDR).
+//     Secuencia buena:
+//        AT+NETOPEN   -> OK   y despues el URC  +NETOPEN: 0
+//        AT+IPADDR    -> +IPADDR: 10.x.x.x
+//     NETOPEN responde OK de inmediato y suelta el resultado real como URC
+//     hasta 120 s despues, asi que hay que esperarlo aparte. Si ya estaba
+//     abierto contesta "+IP ERROR: Network is already opened", que tambien
+//     sirve.
+//     Lo bueno del log de la v1.3: +CSQ: 24,0 y +CEREG: 0,5 en cero segundos.
+//     La SIM, la antena LTE y la cobertura estan perfectas. Solo faltaba abrir.
 //
-//     a) Sintaxis inventada. En el manual SIM767XX V1.02 la ficha de estos tres
-//        comandos (21.2.3, 21.2.4, 21.2.5) tiene UNA sola fila: Execution
-//        Command. No hay Test Command ni Read Command, al contrario de
-//        CGNSSIPR justo debajo, que si lista las tres formas. O sea que
-//        AT+CGPSHOT=? es sintaxis invalida y el ERROR es correcto: el modem
-//        no sabe contestar una pregunta que ese comando no admite.
-//        Estos comandos solo se pueden probar EJECUTANDOLOS.
+//  2. GUARDIA DE TRAMA RANCIA. Este es el hallazgo de verdad.
+//     En la corrida de la v1.2, T4 reporto fix a los 0 s tras 151 s con el
+//     motor apagado, en su UNICO sondeo, con sats=19 y hdop=2.0. La ultima
+//     lectura de T3, 153 s antes, fue sats=19 hdop=2.0. Identicas. Y sus dos
+//     gemelas de la misma condicion (T1 con 22 s, T5 con 26 s) no hicieron eso.
+//     Lo mas probable es que +CGNSSINFO devolviera la ultima solucion guardada
+//     en vez de una nueva.
+//     Es la TERCERA variante de la trama fantasma y es la peligrosa. Las dos
+//     anteriores traian sats=0 y hdop=-1, y el gate las mataba. Esta trae
+//     numeros impecables y pasa el gate sin despeinarse. En produccion eso es
+//     publicar una posicion de hace dos minutos y medio como si fuera actual:
+//     a 60 km/h, 2,5 km de mentira.
+//     Lo unico que la delata es la fecha y la hora que vienen DENTRO de la
+//     propia trama (campos 9 y 10 de +CGNSSINFO), que nunca miramos.
+//     Aqui se guarda la marca de tiempo del ultimo fix aceptado y se rechaza
+//     cualquier trama que llegue con esa misma marca: no es nueva, es la de
+//     antes. Se cuenta en la columna 'rancias' y el cronometro sigue corriendo.
+//     Si el guardia no dispara nunca, T4 fue una readquisicion genuina y
+//     tambien es buena noticia. En los dos casos salimos ganando.
 //
-//     b) Momento equivocado. La ficha empieza con la misma nota que CGNSSMODE:
-//        "This command is valid after the GNSS power on!". La sonda corria en
-//        el segundo 13, justo despues de leer +CGNSSPWR: 0. Motor apagado,
-//        rechazo garantizado aunque la sintaxis hubiera sido correcta.
+//  LO QUE YA QUEDO CONTESTADO (corridas del 2026-08-22)
+//    - El tiempo con el GNSS apagado NO alarga el TTFF: 279 s apagado fijo en
+//      5 s; 150 s apagado fijo en 22 s. Al reves de lo esperado. Descartado.
+//    - El sueno por DTR cuesta ~15 s, no los 90 que temiamos. Se sigue
+//      durmiendo el modem: es de donde sale el ahorro. F23 con ventana de
+//      gracia de 150 s lo cubre de sobra.
+//    - Los 120 s de R3 en la v1.1 eran el CIELO, no el DTR: el baseline de ese
+//      dia fue 124 s (bajo techo) contra 17 s del dia siguiente. Por eso P0
+//      manda y ninguna conclusion vale sin el.
+//    - Repetibilidad del control: T1=22 s y T5=26 s en la misma condicion. El
+//      piso de ruido es +/- 4 s con cielo bueno.
+//    - CRESET no borra nada caro. El pulso de PWRKEY sobre modem vivo no lo
+//      tumba. CGNSSMODE es SAVE-persistente y solo se puede leer con el motor
+//      encendido. El URC +CGNSSPWR: READY! no existe en este firmware.
 //
-//  2. LA SECUENCIA DE T4 Y T5 ESTABA AL REVES.
-//     La v1.2 mandaba CGPSHOT EN VEZ DE CGNSSPWR=1, siguiendo el application
-//     note de la serie SIM82XX, que dice que estos comandos van con el motor
-//     apagado. Esa nota es de otra familia, la que arranca con AT+CGPS=1.
-//     Para la nuestra el orden es el contrario: primero CGNSSPWR=1, despues el
-//     comando de arranque. Por eso en la corrida de la v1.2 T4 y T5 caen al
-//     fallback y terminan siendo dos copias de T1.
-//     Aqui el comando de arranque pasa a ser un EMPUJON despues del encendido,
-//     y el cronometro sigue arrancando en CGNSSPWR=1 para que todo siga
-//     comparable contra T1.
+//  POR QUE EL EMPUJON VA DESPUES DEL ENCENDIDO
+//    Las fichas de CGPSHOT, CGPSWARM y CGPSCOLD (21.2.3 a 21.2.5 del manual
+//    SIM767XX V1.02) tienen UNA sola fila, Execution Command: no admiten la
+//    forma =? ni la forma ?. Por eso el sondeo de la v1.2 dio ERROR y por eso
+//    no probaba nada. Y empiezan con la nota "This command is valid after the
+//    GNSS power on!", asi que van DESPUES de CGNSSPWR=1, no en su lugar. La
+//    v1.2 los mandaba en vez del encendido, siguiendo un application note de
+//    la serie SIM82XX, que es otra familia. De ahi los ERROR de T4 y T5.
+//    El cronometro sigue arrancando en CGNSSPWR=1 para que todo sea comparable
+//    contra T1; el empujon entra un par de segundos despues y se anota a que
+//    milisegundo del encendido se mando.
 //
-//  3. CGPSWARM Y CGPSCOLD SON DESTRUCTIVOS, NO SON MEJORAS.
-//     Definicion estandar de GNSS: hot = usa las efemerides que ya tienes;
-//     warm = conserva almanaque, hora y posicion pero DESCARTA las efemerides;
-//     cold = descarta todo. Es decir que CGPSWARM no puede acelerar nada
-//     partiendo de un estado caliente: por diseno tiene que salir mas lento, y
-//     encima deja frio al motor para la corrida siguiente.
-//     El usuario del issue 453 gano tiempo con CGPSWARM porque su punto de
-//     partida era un arranque en frio de 5-10 min. Nuestro punto de partida es
-//     otro.
-//     Asi que aqui CGPSWARM cambia de papel: deja de ser candidato y pasa a ser
-//     CONTROL POSITIVO. Si T5 sale claramente mas lento que T1, queda probado
-//     que este firmware SI obedece la familia CGPSxxx, y entonces un T4 igual a
-//     T1 significa "ya estabamos calientes", no "el comando se ignora".
-//     Sin ese control, T4 igual a T1 no se puede interpretar.
-//     Por eso T5 va de ULTIMO: envenena las efemerides de lo que venga detras.
+//  POR QUE T5 (WARM) ES CONTROL Y VA DE ULTIMO
+//    Por definicion, warm start conserva almanaque, hora y posicion pero
+//    DESCARTA las efemerides. Partiendo de un estado caliente tiene que salir
+//    mas lento, y encima deja frio al motor para lo que venga detras.
+//    Entonces no es candidato: es control positivo. Si T5 sale claramente mas
+//    lento que T1, queda probado que este firmware obedece la familia CGPSxxx
+//    y solo entonces un T4 igual a T1 se puede leer como "ya estabamos
+//    calientes" en vez de "el comando se ignora". Va de ultimo porque envenena.
 //
-//  4. APARECIERON COMANDOS NUEVOS EN EL MANUAL V1.02.
-//     El V1.01 que veniamos usando tiene 364 paginas; el V1.02 tiene 380 y su
-//     capitulo 21 es mas largo. Entradas que no conociamos:
-//       21.2.12 AT+CGNSSRTC     configurar el modo RTC del GNSS
-//       21.2.13 AT+CGNSSSLEEP   dormir el motor GNSS  (en el V1.01 decia
-//       21.2.14 AT+CGNSSWAKEUP  despertarlo            "GNSS UART into Sleep")
-//       21.2.17 AT+CGNSSFLP     modo de ahorro periodico del propio motor
-//       21.2.23 AT+CGNSSAGPS    bajar datos A-GNSS del servidor
-//     Las dos que importan hoy: CGNSSSLEEP y A-GNSS.
-//
-//  5. A-GNSS DEJA DE SER OPCIONAL.
-//     Confirmado por LilyGO en el issue 453: las efemerides viven en la RAM del
-//     modulo alimentada, no en flash, y se pierden cuando el modem se apaga.
-//     En estacionado de 24 h el corte es total, o sea que el arranque en frio
-//     es inevitable y no hay nada que preservar. La unica salida a un fix
-//     rapido despues de un pulso de 24 h es bajar la asistencia por LTE.
-//     En el issue 117 de T-SIM7600X, lewisxhe reporta que SIMCOM le confirmo
-//     que A-GNSS SI funciona en el SIM7670G y que el manual que circulaba
-//     estaba mal. Su secuencia: red arriba -> CGDRT -> CGSETV -> CGNSSPWR=1 ->
-//     CGNSSIPR -> CGNSSPWR? -> CAGPS.
-//     Aqui la red se levanta UNA vez al arrancar el banco, antes del baseline,
-//     para que el tiempo de registro no se le sume al TTFF de la corrida.
-//
-//  QUE SE MIDE EN ESTA PASADA
+//  QUE SE MIDE
 //    T1  warm_ctrl   CGNSSPWR=1 y nada mas.                    Referencia.
 //    T4  hot_cmd     CGNSSPWR=1 y despues AT+CGPSHOT.          El candidato.
 //    T9  agps        CGNSSPWR=1 y despues AT+CAGPS.            El de 24 h.
@@ -79,22 +89,18 @@
 //                    despues CGNSSWAKEUP.                      El de parqueo.
 //    T5  warm_cmd    CGNSSPWR=1 y despues AT+CGPSWARM.         Control positivo.
 //
-//    T10 merece explicacion. Hoy en estacionado apagamos el motor con
-//    CGNSSPWR=0 y perdemos el contexto. Si el motor tiene su propio sueno, tal
-//    vez no haya que apagarlo nunca en paradas cortas. La corrida hace lo
-//    mismo que hace el tracker de verdad: consigue un fix, duerme el motor 150
-//    s y lo despierta. Se compara contra T1, que tuvo el motor apagado los
-//    mismos 150 s. Si T10 sale mucho mas rapido, hay rediseno de estacionado
-//    (a costa de consumo, que toca medir aparte con el multimetro).
+//    T9 existe porque el corte de energia borra las efemerides SIEMPRE
+//    (confirmado por LilyGO en el issue 453: viven en RAM alimentada, no en
+//    flash). En el pulso de 24 h el frio es inevitable y bajar asistencia por
+//    LTE es la unica salida. Se compara contra los 117 s de R0, no contra T1.
+//    SIMCOM le confirmo a lewisxhe que A-GNSS si funciona en el SIM7670G
+//    (issue 117 de T-SIM7600X) y que el manual que circulaba estaba mal.
 //
-//  YA RESPONDIDO Y POR ESO DESACTIVADO
-//    - CRESET no borra nada caro (42 s) y el modem contesta en 1 s.
-//    - El pulso de PWRKEY sobre modem vivo NO lo tumba.
-//    - CGNSSMODE es SAVE-persistente y su escritura suelta una trama con
-//      lat/lon viejas y sats en cero: el gate sats >= 5 es obligatorio.
-//    - CGNSSMODE? con el GNSS apagado siempre da ERROR.
-//    - El desempate del sueno por DTR (T2 y T3) lo contesta la corrida de la
-//      v1.2. Quedan definidos por si toca repetir.
+//    T10 hace lo mismo que hace el tracker al estacionar, pero en vez de
+//    cortarle la energia al motor lo duerme. Es la corrida donde el guardia de
+//    trama rancia importa mas: despertar y que reporte fix instantaneo es
+//    justo el escenario donde una trama vieja nos haria rediseniar el
+//    estacionado por nada.
 //
 //  CONDICIONES IGUALADAS CON main.cpp
 //    - UART1 a 115200 en los mismos pines (RX 5 / TX 4).
@@ -102,8 +108,7 @@
 //      1000 ms, LOW.  OJO: at_passthrough.cpp tiene la polaridad invertida.
 //    - Gate de calidad: sats >= 5 y HDOP <= 2.5.
 //    - Bateria con warmup de 8 muestras descartadas, como ADC_WARMUP_READS.
-//    - Sin espera del URC READY: este firmware no lo emite. 2 s de cortesia y
-//      a sondear cada segundo.
+//    - Sin espera del URC READY: 2 s de cortesia y a sondear cada segundo.
 //
 //  ANTES DE FLASHEAR
 //    1. Desconecta USB y saca la 18650 unos 10 s.
@@ -134,7 +139,7 @@
 #define MAX_VALID_HDOP                2.5f
 
 // ------------------------------------------------------- parametros del banco
-#define LAB_VERSION                   "gnss_lab 1.3"
+#define LAB_VERSION                   "gnss_lab 1.4"
 #define FIX_TIMEOUT_S                 300UL   // techo por corrida
 #define PREFLIGHT_TIMEOUT_S           240UL   // techo del baseline de cielo
 #define POSTFIX_GRACE_S               60UL    // margen para pasar el gate
@@ -148,6 +153,7 @@
 #define DTR_SLEEP_SHORT_S             20UL    // sueno corto (corrida opcional)
 #define PRESLEEP_FIX_S                120UL   // techo del fix previo a CGNSSSLEEP
 #define NET_TIMEOUT_S                 90UL    // techo del registro en red
+#define NETOPEN_TIMEOUT_MS            45000UL // techo del URC +NETOPEN
 #define START_COUNTDOWN_S             10UL
 #define SERIAL_WAIT_MS                8000UL
 
@@ -234,9 +240,11 @@ struct RunResult {
   float    hdop       = -1.0f;
   uint16_t pollsEmpty = 0;
   uint16_t pollsError = 0;
+  uint16_t pollsStale = 0;   // tramas con la marca de tiempo del fix anterior
   uint16_t pollsTotal = 0;
   float    batV       = 0.0f;
   String   modeAfter  = "-";
+  String   stamp      = "-";  // fecha/hora que traia la trama aceptada
   String   note       = "-";
 };
 
@@ -248,12 +256,19 @@ static bool     skyOk         = false;
 static uint32_t skyTtffMs     = 0;
 static int      skySats       = 0;
 static float    skyHdop       = -1.0f;
+static String   skyStamp      = "-";
 static int      rechargesUsed = 0;
 static String   abortReason   = "";
 static String   cmdSupport    = "(no probado)";
 static uint32_t gnssOffSinceMs = 0;   // cuando se apago o durmio el GNSS
 static bool     netOk         = false;
 static String   netIp         = "-";
+
+// Guardia de trama rancia: marca de tiempo del ultimo fix REAL que vimos.
+// Cualquier trama que llegue con esta misma marca no es nueva.
+static String   lastFixStamp  = "";
+static uint16_t staleTotal    = 0;
+static bool     stampAvail    = true;   // el firmware llena fecha/hora?
 
 // =============================================================================
 //  Utilidades de log
@@ -408,9 +423,32 @@ static String fieldAfter(const String &resp, const char *tag) {
   return s;
 }
 
+// Espera un URC concreto que llega DESPUES del OK. NETOPEN funciona asi.
+static String waitUrc(const char *tag, uint32_t timeoutMs) {
+  String   acc;
+  uint32_t t0 = millis();
+  while (millis() - t0 < timeoutMs) {
+    while (SerialAT.available()) acc += (char)SerialAT.read();
+    if (acc.indexOf(tag) >= 0) break;
+    delay(50);
+  }
+  if (acc.length()) {
+    logf("[AT  ] < %s   (URC tras %lu ms)", oneLine(acc).c_str(),
+         (unsigned long)(millis() - t0));
+  } else {
+    logf("[AT  ] sin URC %s en %lu ms", tag, (unsigned long)(millis() - t0));
+  }
+  return acc;
+}
+
 // =============================================================================
 //  Red: se levanta UNA vez al arrancar, para que A-GNSS tenga por donde bajar
 //  la asistencia y para que ese tiempo no se le sume al TTFF de ninguna corrida.
+//
+//  Dos capas, y la v1.3 solo levantaba la primera:
+//    contexto PDP        -> AT+CGACT=1,1   (capa 3GPP)
+//    servicio de sockets -> AT+NETOPEN     (pila TCP/IP de SIMCOM)
+//  AT+IPADDR pregunta por la segunda.
 // =============================================================================
 static bool netUp() {
   Serial.println();
@@ -432,18 +470,41 @@ static bool netUp() {
        (unsigned long)((millis() - t0) / 1000));
   if (!reg) { netIp = "sin registro"; return false; }
 
+  // Informativo: que APN quedo y si el contexto ya estaba activo.
+  atSend("AT+CCLK?", 3000, false);      // hora de red: sirve para leer las marcas
+  atSend("AT+CGDCONT?", 5000, false);
+  atSend("AT+CGACT?", 5000, false);
+
+  // ---- el paso que faltaba en la v1.3 --------------------------------------
+  String ro = atSend("AT+NETOPEN", 20000, false);
+  bool opened = ro.indexOf("+NETOPEN: 0") >= 0 ||
+                ro.indexOf("already opened") >= 0;
+  if (!opened && ro.indexOf("OK") >= 0) {
+    // NETOPEN contesta OK de una y suelta el resultado real como URC despues.
+    String urc = waitUrc("+NETOPEN:", NETOPEN_TIMEOUT_MS);
+    opened = urc.indexOf("+NETOPEN: 0") >= 0;
+  }
+  logf("[NET ] servicio de sockets: %s", opened ? "ABIERTO" : "NO abrio");
+
   String r = atSend("AT+IPADDR", 8000, false);
   netIp = fieldAfter(r, "+IPADDR:");
+
   if (netIp.indexOf('.') < 0) {
-    logf("[NET ] sin IP todavia, activo el contexto PDP");
+    logf("[NET ] sin IP: activo el contexto PDP y reintento NETOPEN");
     atSend("AT+CGACT=1,1", 15000, false);
     delay(2000);
+    String ro2 = atSend("AT+NETOPEN", 20000, false);
+    if (ro2.indexOf("+NETOPEN:") < 0 && ro2.indexOf("already opened") < 0) {
+      waitUrc("+NETOPEN:", NETOPEN_TIMEOUT_MS);
+    }
+    delay(1000);
     r = atSend("AT+IPADDR", 8000, false);
     netIp = fieldAfter(r, "+IPADDR:");
   }
+
   bool ok = netIp.indexOf('.') >= 0;
   logf("[NET ] IP: %s -> A-GNSS %s", netIp.c_str(),
-       ok ? "tiene por donde bajar" : "NO va a poder bajar nada");
+       ok ? "tiene por donde bajar" : "NO va a poder bajar nada (T9 no sera valida)");
   return ok;
 }
 
@@ -596,10 +657,11 @@ static String pwrkeyOnLiveModem() {
 //  GNSS
 // =============================================================================
 struct GnssSample {
-  bool  hasTag = false;
-  bool  hasFix = false;
-  int   sats   = 0;
-  float hdop   = -1.0f;
+  bool   hasTag = false;
+  bool   hasFix = false;
+  int    sats   = 0;
+  float  hdop   = -1.0f;
+  String stamp  = "";   // fecha/hora que trae la propia trama: ddmmyy/hhmmss.s
 };
 
 static GnssSample gnssPoll() {
@@ -628,7 +690,23 @@ static GnssSample gnssPoll() {
   s.sats = f[1].toInt() + f[2].toInt() + f[3].toInt() + f[4].toInt();
   s.hdop = (f[15].length() > 0) ? f[15].toFloat() : -1.0f;
   s.hasFix = (f[5].length() > 0 && f[7].length() > 0);
+  // Campos 9 y 10: fecha y hora UTC. Es lo unico que distingue una medida
+  // nueva de la ultima solucion guardada.
+  if (f[9].length() > 0 || f[10].length() > 0) s.stamp = f[9] + "/" + f[10];
   return s;
+}
+
+// Devuelve true si esta trama trae la misma marca de tiempo que el ultimo fix
+// aceptado: entonces no es una medida nueva, es la de antes.
+static bool isStale(const GnssSample &s) {
+  if (!s.hasFix) return false;
+  if (s.stamp.length() < 2) return false;      // sin marca no se puede juzgar
+  if (lastFixStamp.length() < 2) return false; // no hay con que comparar
+  return s.stamp == lastFixStamp;
+}
+
+static void notePriorFix(const GnssSample &s) {
+  if (s.hasFix && s.stamp.length() >= 2) lastFixStamp = s.stamp;
 }
 
 static void gnssOff() {
@@ -657,7 +735,12 @@ static String gnssSleepCycle() {
     if (millis() < nextPoll) { delay(20); continue; }
     nextPoll = millis() + POLL_PERIOD_MS;
     GnssSample s = gnssPoll();
-    if (s.hasFix) { got = true; break; }
+    if (s.hasFix && !isStale(s)) {
+      got = true;
+      notePriorFix(s);   // esta marca es la que T10 NO puede volver a ver
+      logf("[GNSS] pre-sueno: fix con marca %s", s.stamp.c_str());
+      break;
+    }
     uint32_t el = (millis() - t0) / 1000UL;
     if (el % 20 == 0 && el > 0) {
       logf("[GNSS] pre-sueno t=%lus sats=%d hdop=%.1f (sin fix aun)",
@@ -845,6 +928,7 @@ static bool warmBaseline(const char *tag) {
   float lastHdop = -1.0f;
   bool  got = false;
   uint32_t ttff = 0;
+  String   stamp = "-";
 
   while (millis() - t0 < PREFLIGHT_TIMEOUT_S * 1000UL) {
     if (millis() < nextPoll) { delay(20); continue; }
@@ -853,7 +937,20 @@ static bool warmBaseline(const char *tag) {
     GnssSample s = gnssPoll();
     if (s.sats > bestSats) bestSats = s.sats;
     if (s.hdop > 0) lastHdop = s.hdop;
-    if (s.hasFix) { got = true; ttff = millis() - t0; break; }
+
+    if (isStale(s)) {
+      staleTotal++;
+      logf("[%s ] TRAMA RANCIA: misma marca del fix anterior (%s). Sigo sondeando.",
+           tag, s.stamp.c_str());
+      continue;
+    }
+    if (s.hasFix) {
+      got   = true;
+      ttff  = millis() - t0;
+      stamp = s.stamp.length() ? s.stamp : String("-");
+      notePriorFix(s);
+      break;
+    }
     if (idx % POLL_LOG_EVERY == 0) {
       logf("[%s ] t=%lus sats=%d hdop=%.1f (sin fix aun)", tag,
            (unsigned long)((millis() - t0) / 1000), s.sats, s.hdop);
@@ -865,8 +962,15 @@ static bool warmBaseline(const char *tag) {
     skyTtffMs = ttff;
     skySats   = bestSats;
     skyHdop   = lastHdop;
-    logf("[%s ] fix crudo a los %lu s  sats=%d hdop=%.1f -> el cielo alcanza",
-         tag, (unsigned long)(ttff / 1000), bestSats, lastHdop);
+    skyStamp  = stamp;
+    logf("[%s ] fix crudo a los %lu s  sats=%d hdop=%.1f marca=%s -> el cielo alcanza",
+         tag, (unsigned long)(ttff / 1000), bestSats, lastHdop, stamp.c_str());
+
+    if (stamp == "-" || stamp.length() < 2) {
+      stampAvail = false;
+      logf("[%s ] la trama NO trae fecha/hora: el guardia de trama rancia queda INACTIVO",
+           tag);
+    }
 
     // El motor esta encendido y con fix: el unico momento bueno para preguntar.
     if (cmdSupport == "(no probado)") {
@@ -897,6 +1001,10 @@ static void runOne(const RunCfg &cfg, RunResult &out, bool coolAfter) {
   out.ran  = true;
   out.batV = readBatV();
   logf("[%s ] Vbat aprox %.2f V", cfg.id, out.batV);
+  if (lastFixStamp.length() >= 2) {
+    logf("[%s ] marca del fix anterior: %s (cualquier trama con esta marca se descarta)",
+         cfg.id, lastFixStamp.c_str());
+  }
 
   // ---- variable bajo prueba -------------------------------------------------
   switch (cfg.pre) {
@@ -949,41 +1057,63 @@ static void runOne(const RunCfg &cfg, RunResult &out, bool coolAfter) {
     if (!s.hasTag)      out.pollsError++;
     else if (!s.hasFix) out.pollsEmpty++;
 
+    // ---- guardia de trama rancia -------------------------------------------
+    // Fix con la MISMA fecha/hora del fix anterior. No es una medida nueva: es
+    // la ultima solucion guardada. Pasa el gate con numeros impecables, asi que
+    // el gate no la puede atrapar. Solo la marca de tiempo la delata.
+    bool stale = isStale(s);
+    if (stale) {
+      out.pollsStale++;
+      staleTotal++;
+      if (out.pollsStale == 1) {
+        logf("[%s ] t=%lus TRAMA RANCIA: fix con la marca del fix anterior (%s), "
+             "sats=%d hdop=%.1f. No es nueva. Sigo cronometrando.",
+             cfg.id, (unsigned long)((millis() - t0) / 1000),
+             s.stamp.c_str(), s.sats, s.hdop);
+      }
+    }
+    bool fresh = s.hasFix && !stale;
+
     // Trama envenenada: lat/lon presentes pero sin satelites ni HDOP. Es la
     // ultima posicion conocida, no una medida. El gate de main.cpp la mata.
-    bool poisoned = s.hasFix && (s.sats == 0 || s.hdop <= 0.0f);
+    bool poisoned = fresh && (s.sats == 0 || s.hdop <= 0.0f);
     if (poisoned) {
       logf("[%s ] t=%lus TRAMA FANTASMA: fix con sats=%d hdop=%.1f (posicion vieja)",
            cfg.id, (unsigned long)((millis() - t0) / 1000), s.sats, s.hdop);
     }
 
-    bool passesGate = s.hasFix &&
+    bool passesGate = fresh &&
                       s.sats >= MIN_VALID_SATELLITES &&
                       s.hdop > 0.0f && s.hdop <= MAX_VALID_HDOP;
 
-    if (s.hasFix && !out.fixRaw) {
+    if (fresh && !out.fixRaw) {
       out.fixRaw    = true;
       out.ttffRawMs = millis() - t0;
       graceDeadline = millis() + POSTFIX_GRACE_S * 1000UL;
-      logf("[%s ] *** FIX CRUDO a los %lu s   sats=%d hdop=%.1f",
-           cfg.id, (unsigned long)(out.ttffRawMs / 1000), s.sats, s.hdop);
+      logf("[%s ] *** FIX CRUDO a los %lu s   sats=%d hdop=%.1f marca=%s",
+           cfg.id, (unsigned long)(out.ttffRawMs / 1000), s.sats, s.hdop,
+           s.stamp.length() ? s.stamp.c_str() : "-");
     }
+    if (fresh) notePriorFix(s);
+
     if (passesGate && !out.fixValid) {
       out.fixValid  = true;
       out.ttffValMs = millis() - t0;
       out.sats      = s.sats;
       out.hdop      = s.hdop;
+      out.stamp     = s.stamp.length() ? s.stamp : String("-");
       logf("[%s ] *** FIX QUE PASA EL GATE a los %lu s   sats=%d hdop=%.1f",
            cfg.id, (unsigned long)(out.ttffValMs / 1000), s.sats, s.hdop);
       break;
     }
 
     bool interesting = (s.sats != lastSats) || (pollIdx % POLL_LOG_EVERY == 0);
-    if (interesting) {
-      logf("[%s ] t=%lus poll=%d fix=%s sats=%d hdop=%.1f vacios=%u err=%u",
+    if (interesting && !stale) {
+      logf("[%s ] t=%lus poll=%d fix=%s sats=%d hdop=%.1f vacios=%u rancias=%u err=%u",
            cfg.id, (unsigned long)((millis() - t0) / 1000), pollIdx,
            s.hasFix ? "si" : "no", s.sats, s.hdop,
-           (unsigned)out.pollsEmpty, (unsigned)out.pollsError);
+           (unsigned)out.pollsEmpty, (unsigned)out.pollsStale,
+           (unsigned)out.pollsError);
       lastSats = s.sats;
     }
 
@@ -1001,6 +1131,12 @@ static void runOne(const RunCfg &cfg, RunResult &out, bool coolAfter) {
          cfg.id, (unsigned long)FIX_TIMEOUT_S);
     if (out.note == "-") out.note = "sin fix crudo";
     else                 out.note += "; sin fix crudo";
+  }
+  if (out.pollsStale) {
+    String extra = String("descarto ") + String((unsigned)out.pollsStale) +
+                   " trama(s) rancia(s)";
+    if (out.note == "-") out.note = extra;
+    else                 out.note += "; " + extra;
   }
 
   out.modeAfter = fieldAfter(atSend("AT+CGNSSMODE?", 3000, false), "+CGNSSMODE:");
@@ -1024,7 +1160,7 @@ static void printSummary() {
 
   Serial.println();
   Serial.println("=================================================================");
-  Serial.println(" RESUMEN GNSS LAB 1.3 - arranque asistido, A-GNSS y sueno del motor");
+  Serial.println(" RESUMEN GNSS LAB 1.4 - arranque asistido, A-GNSS y sueno del motor");
   Serial.println("=================================================================");
   if (skyOk) {
     Serial.printf(" cielo (baseline): fix crudo en %lu s, sats %d, hdop %.1f\r\n",
@@ -1034,13 +1170,16 @@ static void printSummary() {
   }
   Serial.printf(" red: %s (IP %s)\r\n", netOk ? "arriba" : "ABAJO", netIp.c_str());
   Serial.printf(" familia CGPSxxx: %s\r\n", cmdSupport.c_str());
+  Serial.printf(" guardia de trama rancia: %s, %u descartada(s) en total\r\n",
+                stampAvail ? "activo" : "INACTIVO (la trama no trae fecha/hora)",
+                (unsigned)staleTotal);
   if (rechargesUsed)        Serial.printf(" recargas de NVRAM usadas: %d\r\n", rechargesUsed);
   if (abortReason.length()) Serial.printf(" ABORTADO: %s\r\n", abortReason.c_str());
   Serial.println("-----------------------------------------------------------------");
 
-  Serial.printf("%-4s %-13s %-13s %-7s %7s %8s %8s %5s %5s %6s %5s  %s\r\n",
+  Serial.printf("%-4s %-13s %-13s %-7s %7s %8s %8s %5s %5s %6s %7s %5s  %s\r\n",
                 "run", "variable", "pre", "start", "off_s", "ttff_raw", "ttff_val",
-                "sats", "hdop", "vacios", "err", "nota");
+                "sats", "hdop", "vacios", "rancias", "err", "nota");
 
   for (int i = 0; i < RUN_COUNT; i++) {
     if (!results[i].ran) continue;
@@ -1055,54 +1194,70 @@ static void printSummary() {
     if (r.hdop > 0) snprintf(hdop, sizeof(hdop), "%.1f", r.hdop);
     else            snprintf(hdop, sizeof(hdop), "-");
 
-    Serial.printf("%-4s %-13s %-13s %-7s %6lus %8s %8s %5s %5s %6u %5u  %s\r\n",
+    Serial.printf("%-4s %-13s %-13s %-7s %6lus %8s %8s %5s %5s %6u %7u %5u  %s\r\n",
                   RUNS[i].id, RUNS[i].label, preName(RUNS[i].pre), startName(RUNS[i].start),
                   (unsigned long)r.offTotalS, raw, val, sats, hdop,
-                  (unsigned)r.pollsEmpty, (unsigned)r.pollsError, r.note.c_str());
+                  (unsigned)r.pollsEmpty, (unsigned)r.pollsStale,
+                  (unsigned)r.pollsError, r.note.c_str());
   }
 
   Serial.println();
   Serial.println("=== CSV (pegar en el log de sesion) ===");
   Serial.println("run,variable,pre,start,off_s,ttff_raw_s,ttff_valid_s,sats,hdop,"
-                 "polls_vacios,polls_error,polls_total,ready,mode_post,vbat,nota");
+                 "polls_vacios,polls_rancios,polls_error,polls_total,ready,mode_post,"
+                 "vbat,utc_fix,nota");
   for (int i = 0; i < RUN_COUNT; i++) {
     if (!results[i].ran) continue;
     RunResult &r = results[i];
     String note = r.note;
     note.replace(",", ";");
-    Serial.printf("%s,%s,%s,%s,%lu,%ld,%ld,%d,%.1f,%u,%u,%u,%s,%s,%.2f,%s\r\n",
+    Serial.printf("%s,%s,%s,%s,%lu,%ld,%ld,%d,%.1f,%u,%u,%u,%u,%s,%s,%.2f,%s,%s\r\n",
                   RUNS[i].id, RUNS[i].label, preName(RUNS[i].pre), startName(RUNS[i].start),
                   (unsigned long)r.offTotalS,
                   r.fixRaw   ? (long)(r.ttffRawMs / 1000) : -1L,
                   r.fixValid ? (long)(r.ttffValMs / 1000) : -1L,
                   r.fixValid ? r.sats : -1,
                   r.hdop,
-                  (unsigned)r.pollsEmpty, (unsigned)r.pollsError, (unsigned)r.pollsTotal,
-                  r.ready ? "si" : "no", r.modeAfter.c_str(), r.batV, note.c_str());
+                  (unsigned)r.pollsEmpty, (unsigned)r.pollsStale,
+                  (unsigned)r.pollsError, (unsigned)r.pollsTotal,
+                  r.ready ? "si" : "no", r.modeAfter.c_str(), r.batV,
+                  r.stamp.c_str(), note.c_str());
   }
-  Serial.printf("P0,baseline_cielo,-,pwr,0,%ld,-1,%d,%.1f,0,0,0,no,-,0.00,%s\r\n",
+  Serial.printf("P0,baseline_cielo,-,pwr,0,%ld,-1,%d,%.1f,0,0,0,0,no,-,0.00,%s,%s\r\n",
                 skyOk ? (long)(skyTtffMs / 1000) : -1L, skySats, skyHdop,
+                skyStamp.c_str(),
                 skyOk ? "cielo suficiente" : "sin fix en el baseline");
   Serial.println("=== fin CSV ===");
   Serial.println();
 
   Serial.println("Como se lee, en orden de importancia:");
+  Serial.println(" 0. La columna 'rancias' primero. Si sale mayor que cero en cualquier");
+  Serial.println("    corrida, el modem SI devuelve la posicion vieja al encender y eso es");
+  Serial.println("    un defecto de produccion: main.cpp publicaria esa posicion como");
+  Serial.println("    actual. Hay que meter el chequeo de fecha/hora en readGpsPoint (F22).");
+  Serial.println("    Si sale cero en todas, el fix de 0 s de T4 en la v1.2 fue una");
+  Serial.println("    readquisicion genuina y tambien es buena noticia.");
   Serial.println(" 1. T5 (warm) DEBE salir mas lento que T1. Warm start descarta efemerides");
   Serial.println("    por definicion. Si T5 sale igual que T1, el firmware esta IGNORANDO la");
   Serial.println("    familia CGPSxxx y entonces T4 no prueba nada: todo el bloque se cae.");
   Serial.println(" 2. Con T5 mas lento, T4 (hot) ya se puede leer:");
   Serial.println("      T4 < T1  -> hay que meter CGPSHOT en pmGnssOn. Entra en F19.");
   Serial.println("      T4 = T1  -> CGNSSPWR=1 ya hace hot start solo. Tema cerrado.");
-  Serial.println(" 3. T9 (agps) es el que decide el escenario de 24 h estacionado, donde el");
-  Serial.println("    frio es inevitable porque el corte de energia borra las efemerides.");
+  Serial.println(" 3. T9 (agps) decide el escenario de 24 h estacionado, donde el frio es");
+  Serial.println("    inevitable porque el corte de energia borra las efemerides.");
   Serial.println("    Comparar T9 contra los 117 s de R0, NO contra T1.");
   Serial.println("      T9 muy por debajo de 117 s -> A-GNSS entra al tracker y cambia F23.");
+  Serial.println("      Si la IP salio ERROR, T9 no es valida: no concluir nada de ella.");
   Serial.println(" 4. T10 (gnss_sleep) decide el estacionado corto:");
-  Serial.println("      T10 << T1 -> dormir el motor en vez de apagarlo. Falta medir consumo");
-  Serial.println("                   con el multimetro antes de cambiar nada.");
+  Serial.println("      T10 << T1 y rancias=0 -> dormir el motor en vez de apagarlo. Falta");
+  Serial.println("                   medir consumo con el multimetro antes de cambiar nada.");
+  Serial.println("      T10 << T1 pero rancias>0 -> era la trama vieja. No cambiar nada.");
   Serial.println("      nota 'CGNSSSLEEP no soportado' -> tema cerrado, seguimos apagando.");
   Serial.println(" 5. off_s tiene que salir parecido en T1, T4, T5 y T9 (~150 s). Si alguna");
   Serial.println("    se dispara, esa corrida no es comparable y hay que repetirla.");
+  Serial.println(" 6. Piso de ruido medido el 2026-08-22 con cielo bueno: +/- 4 s (T1=22 s");
+  Serial.println("    y T5=26 s en la misma condicion). Diferencias menores no significan");
+  Serial.println("    nada.");
   if (anyRaw && !anyGate) {
     Serial.println();
     Serial.println(" AVISO: ninguna corrida paso el gate de calidad (tipico en interiores).");
@@ -1136,11 +1291,12 @@ static void banner() {
                 enabled, (unsigned long)FIX_TIMEOUT_S, (unsigned long)GNSS_OFF_WAIT_S);
   Serial.println(" sondeo   : cada 1 s desde el instante del encendido");
   Serial.println(" gate     : sats >= 5 y HDOP <= 2.5 (igual que main.cpp)");
+  Serial.println(" guardia  : se descarta toda trama con la marca de tiempo del fix previo");
   Serial.printf(" filtro   : P0 exige fix crudo en %lu s o aborta\r\n",
                 (unsigned long)PREFLIGHT_TIMEOUT_S);
   Serial.println(" duracion : ~20-25 min tipico, hasta ~40 min en el peor caso");
   Serial.println("=================================================================");
-  Serial.println("  red levantada una vez, antes del baseline, para no ensuciar el TTFF");
+  Serial.println("  red: CEREG + NETOPEN + IPADDR una vez, antes del baseline");
   Serial.println("  P0  baseline_cielo  filtro de sitio, efemerides frescas y capacidades");
   for (int i = 0; i < RUN_COUNT; i++) {
     Serial.printf("  %-4s %-15s pre=%-14s start=%-7s %s\r\n",
