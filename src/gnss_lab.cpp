@@ -29,7 +29,20 @@
 //    2. Conecta USB, flashea y abre el monitor:
 //         pio run -e gnss_lab -t upload
 //         pio device monitor -e gnss_lab
-//    3. Antena GNSS con vista al cielo, quieta. Duracion 25-50 min.
+//    3. Antena GNSS quieta y con el cielo mas abierto que puedas darle.
+//       Duracion 30-55 min.
+//
+//  CORRER EN INTERIORES
+//    P0 es el filtro: enciende el GNSS y exige un fix crudo en 240 s. Si no
+//    lo consigue, el laboratorio aborta ahi mismo y te dice que lo repitas en
+//    exteriores; no gasta los 40 min restantes en seis pruebas ciegas.
+//    Si P0 pasa, el banco sirve en interiores pero solo para comparar los
+//    ttff_raw entre corridas: el gate de calidad (sats >= 5, HDOP <= 2.5) casi
+//    nunca pasa bajo techo, y por eso cada corrida corta 60 s despues del fix
+//    crudo en vez de esperar el techo de 300 s.
+//    Si una corrida se queda sin fix crudo, el banco recarga el NVRAM con otro
+//    baseline antes de seguir (maximo dos veces) para que la corrida siguiente
+//    arranque en igualdad de condiciones. A la tercera falla, aborta.
 //
 //  COMO SE LEE EL RESULTADO
 //    R1 (control, sin tocar nada) deberia dar TTFF corto (~30 s). Si R1 tambien
@@ -63,8 +76,11 @@
 #define MAX_VALID_HDOP                2.5f
 
 // ------------------------------------------------------- parametros del banco
-#define LAB_VERSION                   "gnss_lab 1.0"
+#define LAB_VERSION                   "gnss_lab 1.1"
 #define FIX_TIMEOUT_S                 300UL   // techo por corrida
+#define PREFLIGHT_TIMEOUT_S           240UL   // techo del baseline de cielo
+#define POSTFIX_GRACE_S               60UL    // margen para pasar el gate
+#define MAX_RECHARGES                 2       // baselines de rescate permitidos
 #define POLL_PERIOD_MS                2000UL  // cadencia de CGNSSINFO
 #define POLL_LOG_EVERY                5       // imprime 1 de cada N sondeos
 #define GNSS_OFF_WAIT_S               150UL   // GNSS apagado entre corridas
@@ -130,7 +146,15 @@ struct RunResult {
 };
 
 static RunResult results[RUN_COUNT];
-static bool labDone = false;
+static bool   labDone      = false;
+
+// estado del cielo medido por el baseline
+static bool     skyOk       = false;
+static uint32_t skyTtffMs   = 0;
+static int      skySats     = 0;
+static float    skyHdop     = -1.0f;
+static int      rechargesUsed = 0;
+static String   abortReason = "";
 
 // =============================================================================
 //  Utilidades de log
@@ -437,6 +461,71 @@ static uint32_t gnssOn(bool &readyOut) {
   return t0;
 }
 
+static void coolDown(const char *tag) {
+  logf("[%s  ] GNSS apagado, enfriando %lu s", tag, (unsigned long)GNSS_OFF_WAIT_S);
+  uint32_t w0 = millis();
+  while (millis() - w0 < GNSS_OFF_WAIT_S * 1000UL) {
+    delay(1000);
+    uint32_t el = (millis() - w0) / 1000UL;
+    if (el % 30 == 0 && el > 0) {
+      logf("[%s  ] enfriando %lu/%lu s", tag, (unsigned long)el,
+           (unsigned long)GNSS_OFF_WAIT_S);
+    }
+  }
+}
+
+// =============================================================================
+//  Baseline de cielo: exige un fix crudo antes de seguir.
+//  Sirve de filtro en interiores y deja el NVRAM caliente y comparable.
+// =============================================================================
+static bool warmBaseline(const char *tag) {
+  Serial.println();
+  Serial.println("-----------------------------------------------------------------");
+  logf("[%s  ] BASELINE DE CIELO: enciendo GNSS y espero fix crudo (max %lu s)",
+       tag, (unsigned long)PREFLIGHT_TIMEOUT_S);
+  Serial.println("-----------------------------------------------------------------");
+
+  bool ready = false;
+  uint32_t t0 = gnssOn(ready);
+
+  uint32_t nextPoll = millis();
+  int  idx = 0, bestSats = 0;
+  float lastHdop = -1.0f;
+  bool got = false;
+  uint32_t ttff = 0;
+
+  while (millis() - t0 < PREFLIGHT_TIMEOUT_S * 1000UL) {
+    if (millis() < nextPoll) { delay(20); continue; }
+    nextPoll = millis() + POLL_PERIOD_MS;
+    idx++;
+    GnssSample s = gnssPoll();
+    if (s.sats > bestSats) bestSats = s.sats;
+    if (s.hdop > 0) lastHdop = s.hdop;
+    if (s.hasFix) { got = true; ttff = millis() - t0; break; }
+    if (idx % POLL_LOG_EVERY == 0) {
+      logf("[%s  ] t=%lus sats=%d hdop=%.1f (sin fix aun)", tag,
+           (unsigned long)((millis() - t0) / 1000), s.sats, s.hdop);
+    }
+  }
+
+  gnssOff();
+
+  if (got) {
+    skyOk     = true;
+    skyTtffMs = ttff;
+    skySats   = bestSats;
+    skyHdop   = lastHdop;
+    logf("[%s  ] fix crudo a los %lu s  sats=%d hdop=%.1f -> el cielo alcanza",
+         tag, (unsigned long)(ttff / 1000), bestSats, lastHdop);
+    coolDown(tag);
+    return true;
+  }
+
+  logf("[%s  ] SIN fix crudo en %lu s. Mejor conteo de satelites: %d",
+       tag, (unsigned long)PREFLIGHT_TIMEOUT_S, bestSats);
+  return false;
+}
+
 // =============================================================================
 //  Ejecucion de una corrida
 // =============================================================================
@@ -477,9 +566,11 @@ static void runOne(const RunCfg &cfg, RunResult &out) {
   }
 
   // ---- cronometro ----------------------------------------------------------
-  uint32_t nextPoll = millis();
-  int      pollIdx  = 0;
-  int      lastSats = -1;
+  uint32_t nextPoll      = millis();
+  uint32_t graceDeadline = 0;
+  int      pollIdx       = 0;
+  int      lastSats      = -1;
+
   while (millis() - t0 < FIX_TIMEOUT_S * 1000UL) {
     if (millis() < nextPoll) { delay(20); continue; }
     nextPoll = millis() + POLL_PERIOD_MS;
@@ -497,6 +588,7 @@ static void runOne(const RunCfg &cfg, RunResult &out) {
     if (s.hasFix && !out.fixRaw) {
       out.fixRaw    = true;
       out.ttffRawMs = millis() - t0;
+      graceDeadline = millis() + POSTFIX_GRACE_S * 1000UL;
       logf("[%s  ] *** FIX CRUDO a los %lu s   sats=%d hdop=%.1f",
            cfg.id, (unsigned long)(out.ttffRawMs / 1000), s.sats, s.hdop);
     }
@@ -518,39 +610,57 @@ static void runOne(const RunCfg &cfg, RunResult &out) {
            (unsigned)out.pollsEmpty, (unsigned)out.pollsError);
       lastSats = s.sats;
     }
+
+    // En interiores el gate casi nunca pasa: no gastes el techo entero.
+    if (graceDeadline && !out.fixValid && millis() > graceDeadline) {
+      logf("[%s  ] fix crudo sin pasar el gate en %lu s de gracia: corto aqui",
+           cfg.id, (unsigned long)POSTFIX_GRACE_S);
+      if (out.note == "-") out.note = "fix crudo sin pasar el gate";
+      else                 out.note += "; fix crudo sin pasar el gate";
+      break;
+    }
   }
 
-  if (!out.fixValid) {
-    logf("[%s  ] sin fix valido en %lu s (techo de la prueba)",
+  if (!out.fixRaw) {
+    logf("[%s  ] sin fix crudo en %lu s (techo de la prueba)",
          cfg.id, (unsigned long)FIX_TIMEOUT_S);
+    if (out.note == "-") out.note = "sin fix crudo";
+    else                 out.note += "; sin fix crudo";
   }
 
   out.modeAfter = fieldAfter(atSend("AT+CGNSSMODE?", 3000, false), "+CGNSSMODE:");
   logf("[%s  ] CGNSSMODE con GNSS encendido: %s", cfg.id, out.modeAfter.c_str());
 
-  // ---- apagar y esperar ----------------------------------------------------
   gnssOff();
-  logf("[%s  ] FIN. GNSS apagado, espero %lu s antes de la siguiente",
-       cfg.id, (unsigned long)GNSS_OFF_WAIT_S);
-  uint32_t w0 = millis();
-  while (millis() - w0 < GNSS_OFF_WAIT_S * 1000UL) {
-    delay(1000);
-    uint32_t el = (millis() - w0) / 1000UL;
-    if (el % 30 == 0 && el > 0) {
-      logf("[%s  ] enfriando %lu/%lu s", cfg.id, (unsigned long)el,
-           (unsigned long)GNSS_OFF_WAIT_S);
-    }
-  }
+  logf("[%s  ] FIN", cfg.id);
+  coolDown(cfg.id);
 }
 
 // =============================================================================
 //  Resumen
 // =============================================================================
 static void printSummary() {
+  bool anyGate = false, anyRaw = false;
+  for (int i = 0; i < RUN_COUNT; i++) {
+    if (!results[i].ran) continue;
+    if (results[i].fixValid) anyGate = true;
+    if (results[i].fixRaw)   anyRaw  = true;
+  }
+
   Serial.println();
   Serial.println("=================================================================");
   Serial.println(" RESUMEN GNSS LAB");
   Serial.println("=================================================================");
+  if (skyOk) {
+    Serial.printf(" cielo (baseline): fix crudo en %lu s, sats %d, hdop %.1f\r\n",
+                  (unsigned long)(skyTtffMs / 1000), skySats, skyHdop);
+  } else {
+    Serial.println(" cielo (baseline): SIN FIX. El sitio no da para esta prueba.");
+  }
+  if (rechargesUsed) Serial.printf(" recargas de NVRAM usadas: %d\r\n", rechargesUsed);
+  if (abortReason.length()) Serial.printf(" ABORTADO: %s\r\n", abortReason.c_str());
+  Serial.println("-----------------------------------------------------------------");
+
   Serial.printf("%-3s %-13s %-13s %-10s %8s %8s %5s %5s %6s %5s %8s %9s  %s\r\n",
                 "run", "variable", "pre", "post", "ttff_raw", "ttff_val",
                 "sats", "hdop", "vacios", "err", "mode_pre", "mode_post", "nota");
@@ -593,13 +703,28 @@ static void printSummary() {
                   (unsigned)r.pollsEmpty, (unsigned)r.pollsError, (unsigned)r.pollsTotal,
                   r.modeBefore.c_str(), r.modeAfter.c_str(), r.batV, note.c_str());
   }
+  Serial.printf("P0,baseline_cielo,-,-,%ld,-1,%d,%.1f,0,0,0,-,-,0.00,%s\r\n",
+                skyOk ? (long)(skyTtffMs / 1000) : -1L, skySats, skyHdop,
+                skyOk ? "cielo suficiente" : "sin fix en el baseline");
   Serial.println("=== fin CSV ===");
   Serial.println();
+
   Serial.println("Lectura rapida:");
   Serial.println(" - R1 corto y otra corrida larga -> esa es la culpable, F19 = no hacer eso.");
   Serial.println(" - R1 tambien largo -> el NVRAM no retiene: F19 muere, va F23 (ventana de gracia).");
   Serial.println(" - ttff_raw corto y ttff_valid largo -> el problema es el gate, no el NVRAM.");
   Serial.println(" - R5 con nota 'el pulso APAGO el modem' -> hay que guardar rtcModemAlive de verdad.");
+  if (anyRaw && !anyGate) {
+    Serial.println();
+    Serial.println(" AVISO: ninguna corrida paso el gate de calidad (tipico en interiores).");
+    Serial.println(" Compara solo la columna ttff_raw entre corridas; el veredicto sigue siendo");
+    Serial.println(" valido para F19 porque todas las corridas midieron en el mismo sitio.");
+  }
+  if (!anyRaw) {
+    Serial.println();
+    Serial.println(" AVISO: ninguna corrida consiguio fix. Prueba no concluyente: repite en");
+    Serial.println(" exteriores con la antena al cielo abierto.");
+  }
   Serial.println();
   Serial.println("Este env NO es el tracker. Para volver a produccion:");
   Serial.println("  pio run -e tracker -t upload");
@@ -613,20 +738,24 @@ static void banner() {
   int enabled = 0;
   for (int i = 0; i < RUN_COUNT; i++) if (RUNS[i].enabled) enabled++;
   unsigned long worstMin =
-    (unsigned long)((enabled * (FIX_TIMEOUT_S + GNSS_OFF_WAIT_S + 90UL)) / 60UL);
+    (unsigned long)(((PREFLIGHT_TIMEOUT_S + GNSS_OFF_WAIT_S) +
+                     enabled * (FIX_TIMEOUT_S + GNSS_OFF_WAIT_S + 90UL)) / 60UL);
 
   Serial.println();
   Serial.println("=================================================================");
   Serial.println(" GPS Tracker Logan - GNSS LAB");
   Serial.println("=================================================================");
-  Serial.printf(" version : %s\r\n", LAB_VERSION);
+  Serial.printf(" version  : %s\r\n", LAB_VERSION);
   Serial.printf(" build    : %s %s\r\n", __DATE__, __TIME__);
   Serial.printf(" reset    : %s\r\n", resetReasonName());
   Serial.printf(" corridas : %d activas, techo %lu s de fix, %lu s de enfriado\r\n",
                 enabled, (unsigned long)FIX_TIMEOUT_S, (unsigned long)GNSS_OFF_WAIT_S);
   Serial.printf(" duracion : hasta ~%lu min en el peor caso\r\n", worstMin);
   Serial.println(" gate     : sats >= 5 y HDOP <= 2.5 (igual que main.cpp)");
+  Serial.printf(" filtro   : P0 exige fix crudo en %lu s o aborta\r\n",
+                (unsigned long)PREFLIGHT_TIMEOUT_S);
   Serial.println("=================================================================");
+  Serial.println("  P0 baseline_cielo  filtro y NVRAM caliente");
   for (int i = 0; i < RUN_COUNT; i++) {
     Serial.printf("  %s %-13s pre=%-13s post=%-10s %s\r\n",
                   RUNS[i].id, RUNS[i].label, preName(RUNS[i].pre),
@@ -669,6 +798,8 @@ void setup() {
   }
   if (!alive) {
     logf("[LAB ] el modem no responde AT. Revisa alimentacion y polaridad de PWRKEY.");
+    abortReason = "el modem nunca respondio AT";
+    printSummary();
     labDone = true;
     return;
   }
@@ -685,9 +816,41 @@ void setup() {
   gnssOff();
   delay(20000);
 
+  // ---- P0: filtro de sitio -------------------------------------------------
+  if (!warmBaseline("P0")) {
+    abortReason = "sin fix en el baseline: sitio insuficiente, repetir en exteriores";
+    logf("[LAB ] %s", abortReason.c_str());
+    printSummary();
+    labDone = true;
+    return;
+  }
+
+  // ---- corridas ------------------------------------------------------------
   for (int i = 0; i < RUN_COUNT; i++) {
     if (!RUNS[i].enabled) continue;
     runOne(RUNS[i], results[i]);
+
+    if (results[i].fixRaw) continue;
+
+    // Sin fix crudo el NVRAM queda frio y la corrida siguiente no seria
+    // comparable. Recargo con un baseline antes de continuar.
+    bool anyLeft = false;
+    for (int j = i + 1; j < RUN_COUNT; j++) if (RUNS[j].enabled) { anyLeft = true; break; }
+    if (!anyLeft) break;
+
+    if (rechargesUsed >= MAX_RECHARGES) {
+      abortReason = "dos recargas de NVRAM ya usadas y sigue sin fijar: no concluyente";
+      logf("[LAB ] %s", abortReason.c_str());
+      break;
+    }
+    rechargesUsed++;
+    logf("[LAB ] recarga de NVRAM %d/%d antes de la corrida siguiente",
+         rechargesUsed, MAX_RECHARGES);
+    if (!warmBaseline("Pr")) {
+      abortReason = "la recarga de NVRAM no consiguio fix: repetir en exteriores";
+      logf("[LAB ] %s", abortReason.c_str());
+      break;
+    }
   }
 
   gnssOff();
