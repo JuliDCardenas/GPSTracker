@@ -1,61 +1,86 @@
 // =============================================================================
-//  GPS Tracker Logan  ·  GNSS LAB  ·  src/gnss_lab.cpp  ·  env: gnss_lab
+//  GPS Tracker Logan  ·  GNSS LAB v1.2  ·  src/gnss_lab.cpp  ·  env: gnss_lab
 // =============================================================================
-//  Banco automatizado para cerrar F19: mide el TTFF en varias condiciones
-//  seguidas y senala que esta reiniciando el motor GNSS o apagando el modem.
-//  Sustituye la prueba manual con at_passthrough (cronometro a mano).
+//  QUE CAMBIO RESPECTO A LA v1.1 (corrida del 2026-08-22, log en logs/)
+//
+//  1. SE MURIO LA ESPERA DEL READY FANTASMA.
+//     La v1.1 esperaba 30 s el URC "+CGNSSPWR: READY!" despues de CGNSSPWR=1.
+//     En las 7 corridas del log ese URC NO llego nunca y el modem no mando un
+//     solo byte en esos 30 s: este firmware (SIM767XM5_B05V01_241206) no lo
+//     emite. Consecuencia: el primer sondeo caia en t=30 s y tres corridas
+//     marcaron exactamente 30 s, o sea "30 s o menos", sin saber cuanto menos.
+//     Ahora se espera 2 s por cortesia y se empieza a sondear de una, cada 1 s.
+//     Esto ademas ensaya en el banco el cambio principal de F19 antes de
+//     meterlo en main.cpp: TinyGSM enableGPS() se cuelga en esa misma espera y
+//     devuelve false, regalando 30 s en cada encendido de produccion.
+//
+//  2. DESEMPATE DEL SUENO POR DTR.
+//     En la v1.1, R3 (sueno por DTR) tardo 120 s, casi igual que el arranque en
+//     frio real (117 s), mientras el control tardo 30 s o menos. Pero R3 tuvo
+//     el GNSS apagado 277 s contra 150 s de las demas corridas: el sueno se
+//     sumaba al enfriado. Habia dos explicaciones y un solo dato.
+//       T1 warm_ctrl : GNSS apagado 150 s, nada mas.        Referencia.
+//       T2 long_off  : GNSS apagado 277 s, modem despierto. Aisla el tiempo.
+//       T3 dtr_sleep : GNSS apagado 277 s, 120 s dormido.   Repite R3.
+//     Si T2 sale corto y T3 largo, el culpable es el sueno.
+//     Si T2 y T3 salen largos, el culpable es el tiempo y el sueno es inocente.
+//     Si los tres salen cortos, R3 fue ruido de una sola muestra en interiores.
+//
+//  3. SE PRUEBAN CGPSHOT Y CGPSWARM.
+//     Hallazgo de la investigacion: el manual A76XX (y el SIM7500_SIM7600
+//     seccion 17.3-17.4) documenta AT+CGPSCOLD, AT+CGPSWARM y AT+CGPSHOT, que
+//     arrancan la sesion GNSS forzando el modo de arranque. No son los
+//     CGNSSxxx que veniamos usando, por eso AT+CGNSSCOLD dio ERROR en la v1.1.
+//     En el issue 453 de LilyGo-Modem-Series, con este mismo modulo y este
+//     mismo firmware, un usuario reporta pasar de 5-10 min a 15-60 s anadiendo
+//     CGNSSMODE=15 y CGPSWARM. Regla del manual: deben mandarse con el motor
+//     GNSS apagado, que es justo el estado en el que arranca cada corrida.
+//       T4 hot_cmd  : AT+CGPSHOT  en vez de CGNSSPWR=1.
+//       T5 warm_cmd : AT+CGPSWARM en vez de CGNSSPWR=1.
+//     Si alguno existe y baja el TTFF, vale mas que todo lo demas junto.
+//     Si el comando no existe o no arranca el motor, la corrida cae sola a
+//     CGNSSPWR=1, lo anota y sigue midiendo (no se pierde la corrida).
+//
+//  LO QUE YA QUEDO RESUELTO Y POR ESO NO SE VUELVE A MEDIR
+//    - CRESET no borra nada caro (42 s) y el modem contesta en 1 s.
+//    - El pulso de PWRKEY sobre modem vivo NO lo tumba.
+//    - CGNSSMODE es SAVE-persistente: sobrevive sin reescribirlo.
+//    - CGNSSMODE? con el GNSS apagado siempre da ERROR: el manual dice que el
+//      comando solo es valido con el GNSS encendido. Ya no se pregunta antes.
+//    - Escribir CGNSSMODE=15 cuesta ~10 s y suelta una trama envenenada con
+//      lat/lon viejas y sats vacios. Por eso el gate sats >= 5 es obligatorio.
+//    Esas corridas quedan definidas abajo pero desactivadas, con su resultado
+//    anotado, por si algun dia hay que repetirlas.
+//
+//  DATO DE CONTEXTO PARA LEER EL RESULTADO (issue 453, respuesta de LilyGO)
+//    "Warm start relies on an external RTC backup power supply, so the modem
+//     must be powered on for a warm start to work. If the modem is turned off,
+//     the ephemeris data will be lost."
+//    O sea: las efemerides viven en la RAM del modulo alimentada, NO en flash.
+//    Apagar el modem (CPOF o corte de energia) las pierde siempre. Dormirlo
+//    por DTR en teoria NO deberia perderlas, porque el modulo sigue
+//    alimentado. Justo eso es lo que T2 y T3 van a resolver con datos.
 //
 //  CONDICIONES IGUALADAS CON main.cpp
 //    - UART1 a 115200 en los mismos pines (RX 5 / TX 4).
 //    - Encendido del modem identico a modemPowerOn(): DTR LOW, PWRKEY LOW,
 //      100 ms, HIGH, 1000 ms, LOW.  OJO: at_passthrough.cpp tiene la polaridad
-//      invertida (HIGH -> LOW -> HIGH y lo deja alto); aqui se usa la de
-//      main.cpp, que es la de la secuencia oficial LilyGo.
-//    - Encendido del GNSS identico a pmGnssOn(): CGDRT=1,1 + CGSETV=1,1 +
-//      CGNSSPWR=1 (espera "+CGNSSPWR: READY") + CGNSSIPR=115200 + CGNSSMODE=15.
-//    - Gate de calidad de main.cpp: sats >= 5 y HDOP <= 2.5. Se cronometran los
-//      dos hitos por separado: primer fix crudo y primer fix que pasa el gate.
-//      Si el crudo llega en 40 s y el gate en 3 min, el problema no es el NVRAM.
-//
-//  CONDICIONES QUE NO SE REPRODUCEN (a proposito)
-//    - Sin LTE, sin MQTT, sin deep sleep: el laboratorio necesita el USB vivo.
-//    - El hold de pines (gpio_hold_en / gpio_deep_sleep_hold_en) no se ejercita.
-//      R3 prueba el sueno por DTR a nivel AT con el pin manejado normalmente.
+//      invertida; aqui se usa la de main.cpp, que es la de LilyGo.
+//    - Gate de calidad de main.cpp: sats >= 5 y HDOP <= 2.5. Se cronometran
+//      por separado el primer fix crudo y el primero que pasa el gate.
+//    - Lectura de bateria con warmup de 8 muestras descartadas, como
+//      ADC_WARMUP_READS en main.cpp: en la v1.1 la primera lectura dio 3.57 V
+//      y las cinco siguientes 4.18 V. Sin warmup el ADC miente en la primera.
 //
 //  ANTES DE FLASHEAR
-//    1. Desconecta USB y saca la 18650 unos 10 s: el modem debe arrancar
-//       apagado de verdad, si no el pulso de PWRKEY cae sobre modem vivo y
-//       contamina R0.
-//    2. Conecta USB, flashea y abre el monitor:
-//         pio run -e gnss_lab -t upload
-//         pio device monitor -e gnss_lab
-//    3. Antena GNSS quieta y con el cielo mas abierto que puedas darle.
-//       Duracion 30-55 min.
+//    1. Desconecta USB y saca la 18650 unos 10 s.
+//    2. pio run -e gnss_lab -t upload
+//       pio device monitor -e gnss_lab
+//    3. Antena GNSS quieta, en el mismo sitio de la corrida anterior si se
+//       quiere comparar contra el log del 2026-08-22.
+//    Duracion tipica 25-30 min; techo ~45 min.
 //
-//  CORRER EN INTERIORES
-//    P0 es el filtro: enciende el GNSS y exige un fix crudo en 240 s. Si no
-//    lo consigue, el laboratorio aborta ahi mismo y te dice que lo repitas en
-//    exteriores; no gasta los 40 min restantes en seis pruebas ciegas.
-//    Si P0 pasa, el banco sirve en interiores pero solo para comparar los
-//    ttff_raw entre corridas: el gate de calidad (sats >= 5, HDOP <= 2.5) casi
-//    nunca pasa bajo techo, y por eso cada corrida corta 60 s despues del fix
-//    crudo en vez de esperar el techo de 300 s.
-//    Si una corrida se queda sin fix crudo, el banco recarga el NVRAM con otro
-//    baseline antes de seguir (maximo dos veces) para que la corrida siguiente
-//    arranque en igualdad de condiciones. A la tercera falla, aborta.
-//
-//  COMO SE LEE EL RESULTADO
-//    R1 (control, sin tocar nada) deberia dar TTFF corto (~30 s). Si R1 tambien
-//    tarda minutos, el NVRAM no retiene nada y F19 muere: la respuesta es F23
-//    (ventana de gracia, dejar el GNSS encendido 10-20 min).
-//    Si R1 es corto y otra corrida tarda minutos, esa corrida es la culpable:
-//      R2 largo    -> lo rompe reiniciar el modem (restartModem / pulso).
-//      R3 largo    -> lo rompe el sueno por DTR.
-//      R4 largo    -> lo rompe reescribir CGNSSMODE=15 en cada boot. F19 = 3
-//                     lineas y cuesta cero mA.
-//      R5 sin AT   -> el pulso de PWRKEY sobre modem vivo lo apaga.
-//    Suelo fisico: las subtramas GPS L1 C/A salen cada 30 s. Sin A-GNSS no hay
-//    TTFF por debajo de ~30 s, no persigas mas que eso.
+//  AL TERMINAR, VOLVER A PRODUCCION:  pio run -e tracker -t upload
 // =============================================================================
 
 #include <Arduino.h>
@@ -70,21 +95,25 @@
 #define MODEM_POWERON_PULSE_WIDTH_MS  1000
 #define BAT_ADC_PIN                   8
 #define BAT_DIVIDER_FACTOR            2.0f
+#define ADC_WARMUP_READS              8
 
 // ------------------------------------------------- gate de calidad de main.cpp
 #define MIN_VALID_SATELLITES          5
 #define MAX_VALID_HDOP                2.5f
 
 // ------------------------------------------------------- parametros del banco
-#define LAB_VERSION                   "gnss_lab 1.1"
+#define LAB_VERSION                   "gnss_lab 1.2"
 #define FIX_TIMEOUT_S                 300UL   // techo por corrida
 #define PREFLIGHT_TIMEOUT_S           240UL   // techo del baseline de cielo
 #define POSTFIX_GRACE_S               60UL    // margen para pasar el gate
 #define MAX_RECHARGES                 2       // baselines de rescate permitidos
-#define POLL_PERIOD_MS                2000UL  // cadencia de CGNSSINFO
+#define POLL_PERIOD_MS                1000UL  // cadencia de CGNSSINFO
 #define POLL_LOG_EVERY                5       // imprime 1 de cada N sondeos
+#define READY_WAIT_MS                 2000UL  // cortesia: este firmware no manda READY
 #define GNSS_OFF_WAIT_S               150UL   // GNSS apagado entre corridas
+#define LONG_OFF_EXTRA_S              127UL   // extra de T2: iguala los 277 s de T3
 #define DTR_SLEEP_S                   120UL   // duracion del sueno por DTR
+#define DTR_SLEEP_SHORT_S             20UL    // sueno corto (corrida opcional)
 #define START_COUNTDOWN_S             10UL
 #define SERIAL_WAIT_MS                8000UL
 
@@ -94,17 +123,26 @@ HardwareSerial SerialAT(1);
 //  Definicion de las corridas
 // =============================================================================
 enum Pre : uint8_t {
-  PRE_NONE,           // nada: control
-  PRE_CPOF_PWRKEY,    // AT+CPOF y reencendido por PWRKEY: arranque frio real
-  PRE_CRESET,         // AT+CRESET
-  PRE_DTR_SLEEP,      // CSCLK=1 + DTR alto + despertar
-  PRE_PWRKEY_PULSE    // pulso de PWRKEY sobre modem vivo
+  PRE_NONE,             // nada: control
+  PRE_LONG_OFF,         // espera extra con el GNSS apagado y el modem despierto
+  PRE_DTR_SLEEP,        // CSCLK=1 + DTR alto + despertar
+  PRE_DTR_SLEEP_SHORT,  // igual pero corto: separa el evento de la duracion
+  PRE_CSCLK_AWAKE,      // CSCLK=1 con DTR bajo: configura pero no duerme
+  PRE_CPOF_PWRKEY,      // apagado real del modem: arranque frio de referencia
+  PRE_CRESET,           // AT+CRESET
+  PRE_PWRKEY_PULSE      // pulso de PWRKEY sobre modem vivo
+};
+
+enum Start : uint8_t {
+  START_PWR,   // CGDRT + CGSETV + CGNSSPWR=1   (lo que hace pmGnssOn)
+  START_HOT,   // CGDRT + CGSETV + CGPSHOT
+  START_WARM   // CGDRT + CGSETV + CGPSWARM
 };
 
 enum Post : uint8_t {
-  POST_NONE,          // solo CGNSSPWR=1
+  POST_NONE,          // nada mas
   POST_BAUD,          // + CGNSSIPR=115200
-  POST_BAUD_MODE      // + CGNSSIPR=115200 + CGNSSMODE=15  (lo que hace el boot)
+  POST_BAUD_MODE      // + CGNSSIPR=115200 + CGNSSMODE=15
 };
 
 struct RunCfg {
@@ -112,19 +150,30 @@ struct RunCfg {
   const char *label;
   bool        enabled;
   Pre         pre;
+  Start       start;
   Post        post;
 };
 
 static const RunCfg RUNS[] = {
-  { "R0", "cold_ref",     true,  PRE_CPOF_PWRKEY,  POST_BAUD_MODE },
-  { "R1", "warm_ctrl",    true,  PRE_NONE,         POST_NONE      },
-  { "R2", "creset",       true,  PRE_CRESET,       POST_NONE      },
-  { "R3", "dtr_sleep",    true,  PRE_DTR_SLEEP,    POST_NONE      },
-  { "R4", "cgnssmode15",  true,  PRE_NONE,         POST_BAUD_MODE },
-  { "R5", "pwrkey_pulse", true,  PRE_PWRKEY_PULSE, POST_NONE      },
-  // Desempate: si R4 sale largo, activa R6 para saber si el culpable es
-  // CGNSSIPR (baud) o CGNSSMODE. Suma ~8 min.
-  { "R6", "baud_only",    false, PRE_NONE,         POST_BAUD      },
+  // --- desempate del sueno por DTR ------------------------------------------
+  { "T1", "warm_ctrl",   true,  PRE_NONE,            START_PWR,  POST_NONE },
+  { "T2", "long_off",    true,  PRE_LONG_OFF,        START_PWR,  POST_NONE },
+  { "T3", "dtr_sleep",   true,  PRE_DTR_SLEEP,       START_PWR,  POST_NONE },
+  // --- comandos de arranque que aparecieron en la investigacion -------------
+  { "T4", "hot_cmd",     true,  PRE_NONE,            START_HOT,  POST_NONE },
+  { "T5", "warm_cmd",    true,  PRE_NONE,            START_WARM, POST_NONE },
+  // --- segunda vuelta, activar solo si hace falta ---------------------------
+  // T6: si T3 sale largo, dice si lo rompe el evento de dormir o la duracion.
+  { "T6", "sleep_short", false, PRE_DTR_SLEEP_SHORT, START_PWR,  POST_NONE },
+  // T7: si T3 sale largo, separa configurar CSCLK de dormir de verdad.
+  { "T7", "csclk_awake", false, PRE_CSCLK_AWAKE,     START_PWR,  POST_NONE },
+  // T8: si T3 sale largo Y T4/T5 funcionan, esta es la receta de produccion.
+  { "T8", "hot_tras_sueno", false, PRE_DTR_SLEEP,    START_HOT,  POST_NONE },
+  // --- ya respondidas en la corrida del 2026-08-22 --------------------------
+  { "R0", "cold_ref",    false, PRE_CPOF_PWRKEY,     START_PWR,  POST_BAUD_MODE }, // 117 s
+  { "R2", "creset",      false, PRE_CRESET,          START_PWR,  POST_NONE },      // 42 s
+  { "R4", "cgnssmode15", false, PRE_NONE,            START_PWR,  POST_BAUD_MODE }, // 40 s + trama fantasma
+  { "R5", "pwrkey_live", false, PRE_PWRKEY_PULSE,    START_PWR,  POST_NONE },      // no tumba el modem
 };
 static const int RUN_COUNT = sizeof(RUNS) / sizeof(RUNS[0]);
 
@@ -132,29 +181,32 @@ struct RunResult {
   bool     ran        = false;
   bool     fixRaw     = false;
   bool     fixValid   = false;
+  bool     ready      = false;
   uint32_t ttffRawMs  = 0;
   uint32_t ttffValMs  = 0;
+  uint32_t offTotalS  = 0;
   int      sats       = 0;
   float    hdop       = -1.0f;
   uint16_t pollsEmpty = 0;
   uint16_t pollsError = 0;
   uint16_t pollsTotal = 0;
   float    batV       = 0.0f;
-  String   modeBefore = "-";
   String   modeAfter  = "-";
   String   note       = "-";
 };
 
 static RunResult results[RUN_COUNT];
-static bool   labDone      = false;
+static bool      labDone = false;
 
 // estado del cielo medido por el baseline
-static bool     skyOk       = false;
-static uint32_t skyTtffMs   = 0;
-static int      skySats     = 0;
-static float    skyHdop     = -1.0f;
+static bool     skyOk         = false;
+static uint32_t skyTtffMs     = 0;
+static int      skySats       = 0;
+static float    skyHdop       = -1.0f;
 static int      rechargesUsed = 0;
-static String   abortReason = "";
+static String   abortReason   = "";
+static String   cmdSupport    = "";   // que contesto cada comando de arranque
+static uint32_t gnssOffSinceMs = 0;   // cuando se apago el GNSS por ultima vez
 
 // =============================================================================
 //  Utilidades de log
@@ -185,39 +237,55 @@ static String oneLine(const String &in) {
 
 static const char *preName(Pre p) {
   switch (p) {
-    case PRE_CPOF_PWRKEY:  return "cpof+pwrkey";
-    case PRE_CRESET:       return "creset";
-    case PRE_DTR_SLEEP:    return "dtr_sleep";
-    case PRE_PWRKEY_PULSE: return "pwrkey_pulse";
-    default:               return "nada";
+    case PRE_LONG_OFF:        return "long_off";
+    case PRE_DTR_SLEEP:       return "dtr_sleep";
+    case PRE_DTR_SLEEP_SHORT: return "dtr_sleep_20s";
+    case PRE_CSCLK_AWAKE:     return "csclk_awake";
+    case PRE_CPOF_PWRKEY:     return "cpof+pwrkey";
+    case PRE_CRESET:          return "creset";
+    case PRE_PWRKEY_PULSE:    return "pwrkey_pulse";
+    default:                  return "nada";
   }
 }
 
-static const char *postName(Post p) {
-  switch (p) {
-    case POST_BAUD:      return "baud";
-    case POST_BAUD_MODE: return "baud+mode";
-    default:             return "nada";
+static const char *startName(Start s) {
+  switch (s) {
+    case START_HOT:  return "cgpshot";
+    case START_WARM: return "cgpswarm";
+    default:         return "cgnsspwr";
+  }
+}
+
+static const char *startCmd(Start s) {
+  switch (s) {
+    case START_HOT:  return "AT+CGPSHOT";
+    case START_WARM: return "AT+CGPSWARM";
+    default:         return "AT+CGNSSPWR=1";
   }
 }
 
 static const char *resetReasonName() {
   switch (esp_reset_reason()) {
-    case ESP_RST_POWERON:  return "POWERON";
-    case ESP_RST_EXT:      return "EXT";
-    case ESP_RST_SW:       return "SW";
-    case ESP_RST_PANIC:    return "PANIC";
-    case ESP_RST_INT_WDT:  return "INT_WDT";
-    case ESP_RST_TASK_WDT: return "TASK_WDT";
-    case ESP_RST_WDT:      return "WDT";
-    case ESP_RST_DEEPSLEEP:return "DEEPSLEEP";
-    case ESP_RST_BROWNOUT: return "BROWNOUT";
-    case ESP_RST_SDIO:     return "SDIO";
-    default:               return "UNKNOWN";
+    case ESP_RST_POWERON:   return "POWERON";
+    case ESP_RST_EXT:       return "EXT";
+    case ESP_RST_SW:        return "SW";
+    case ESP_RST_PANIC:     return "PANIC";
+    case ESP_RST_INT_WDT:   return "INT_WDT";
+    case ESP_RST_TASK_WDT:  return "TASK_WDT";
+    case ESP_RST_WDT:       return "WDT";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "UNKNOWN";
   }
 }
 
+// Warmup igual que main.cpp: la primera lectura del ADC no sirve.
 static float readBatV() {
+  for (int i = 0; i < ADC_WARMUP_READS; i++) {
+    (void)analogReadMilliVolts(BAT_ADC_PIN);
+    delay(2);
+  }
   uint32_t acc = 0;
   for (int i = 0; i < 16; i++) {
     acc += analogReadMilliVolts(BAT_ADC_PIN);
@@ -303,7 +371,6 @@ static void pwrkeyPulse() {
 
 static void echoOff() { atSend("ATE0", 2000, false); }
 
-// Apaga el modem de verdad por software y lo vuelve a encender.
 static String modemColdCycle() {
   String note = "-";
   logf("[MDM ] --- apagado real del modem (AT+CPOF) ---");
@@ -344,10 +411,28 @@ static String modemReset() {
   return note;
 }
 
+// Espera con el GNSS ya apagado y el modem despierto. Es el gemelo del sueno:
+// misma duracion, sin dormir. Si T2 sale corto, el tiempo es inocente.
+static String longOffWait() {
+  logf("[MDM ] --- espera extra de %lu s con el modem DESPIERTO ---",
+       (unsigned long)LONG_OFF_EXTRA_S);
+  uint32_t t0 = millis();
+  while (millis() - t0 < LONG_OFF_EXTRA_S * 1000UL) {
+    delay(1000);
+    uint32_t el = (millis() - t0) / 1000UL;
+    if (el % 30 == 0 && el > 0) {
+      logf("[MDM ] esperando despierto %lu/%lu s",
+           (unsigned long)el, (unsigned long)LONG_OFF_EXTRA_S);
+    }
+  }
+  bool alive = modemAnswers(1500);
+  return alive ? "espera larga sin dormir" : "espera larga y el modem quedo mudo";
+}
+
 // CSCLK=1 + DTR alto = el modem duerme. DTR bajo = despierta.
-static String dtrSleepCycle() {
+static String dtrSleepCycle(uint32_t seconds) {
   logf("[MDM ] --- sueno por DTR: CSCLK=1 + DTR HIGH %lu s ---",
-       (unsigned long)DTR_SLEEP_S);
+       (unsigned long)seconds);
   atOk("AT+CSCLK=1", 3000);
   digitalWrite(MODEM_DTR_PIN, HIGH);
   delay(5000);
@@ -357,24 +442,50 @@ static String dtrSleepCycle() {
        awakeWithDtrHigh ? "SIGUE contestando (no durmio)" : "no contesta (durmio)");
 
   uint32_t t0 = millis();
-  while (millis() - t0 < DTR_SLEEP_S * 1000UL) {
+  while (millis() - t0 < seconds * 1000UL) {
     delay(1000);
     uint32_t el = (millis() - t0) / 1000UL;
-    if (el % 30 == 0) logf("[MDM ] dormido por DTR %lu/%lu s",
-                           (unsigned long)el, (unsigned long)DTR_SLEEP_S);
+    if (el % 30 == 0 && el > 0) logf("[MDM ] dormido por DTR %lu/%lu s",
+                                     (unsigned long)el, (unsigned long)seconds);
   }
 
   digitalWrite(MODEM_DTR_PIN, LOW);
   delay(200);
   bool back = waitModemAt(20000UL);
   atOk("AT+CSCLK=0", 3000);
-  if (!awakeWithDtrHigh && back) return "durmio y despertio por DTR";
-  if (awakeWithDtrHigh)         return "no llego a dormir con DTR alto";
+  if (!awakeWithDtrHigh && back) {
+    return String("durmio ") + String((unsigned long)seconds) + "s y despertio por DTR";
+  }
+  if (awakeWithDtrHigh) return "no llego a dormir con DTR alto";
   return "no despertio por DTR";
 }
 
+// CSCLK=1 pero con DTR abajo: el modem queda configurado para dormir y no
+// duerme. Si esto solo ya rompe el TTFF, el problema es el comando, no el sueno.
+static String csclkAwake() {
+  logf("[MDM ] --- CSCLK=1 con DTR BAJO durante %lu s (no debe dormir) ---",
+       (unsigned long)LONG_OFF_EXTRA_S);
+  atOk("AT+CSCLK=1", 3000);
+  digitalWrite(MODEM_DTR_PIN, LOW);
+  uint32_t t0 = millis();
+  bool everMute = false;
+  while (millis() - t0 < LONG_OFF_EXTRA_S * 1000UL) {
+    delay(1000);
+    uint32_t el = (millis() - t0) / 1000UL;
+    if (el % 30 == 0 && el > 0) {
+      bool alive = modemAnswers(1000);
+      if (!alive) everMute = true;
+      logf("[MDM ] %lu/%lu s con CSCLK=1 y DTR bajo: modem %s",
+           (unsigned long)el, (unsigned long)LONG_OFF_EXTRA_S,
+           alive ? "despierto" : "MUDO");
+    }
+  }
+  atOk("AT+CSCLK=0", 3000);
+  return everMute ? "CSCLK=1 lo durmio aun con DTR bajo" : "CSCLK=1 sin dormir";
+}
+
 static String pwrkeyOnLiveModem() {
-  logf("[MDM ] --- pulso de PWRKEY sobre modem VIVO (sospechoso 3) ---");
+  logf("[MDM ] --- pulso de PWRKEY sobre modem VIVO ---");
   pwrkeyPulse();
   delay(5000);
   bool alive = modemAnswers(2000);
@@ -435,28 +546,55 @@ static GnssSample gnssPoll() {
 
 static void gnssOff() {
   atSend("AT+CGNSSPWR=0", 5000, false);
+  gnssOffSinceMs = millis();
 }
 
-// Devuelve el instante exacto del CGNSSPWR=1: la referencia del TTFF.
-static uint32_t gnssOn(bool &readyOut) {
+// Arranca el motor GNSS y devuelve el instante exacto del comando: la
+// referencia del TTFF. Ya NO se esperan 30 s por un URC que este firmware no
+// manda; se dan 2 s de cortesia y se empieza a sondear.
+static uint32_t gnssStart(Start st, bool &readyOut, String &noteOut) {
   atSend("AT+CGDRT=1,1", 3000, false);       // alimentacion de antena GNSS
   atSend("AT+CGSETV=1,1", 3000, false);
 
+  const char *cmd = startCmd(st);
   uint32_t t0 = millis();
-  String r = atSend("AT+CGNSSPWR=1", 6000, false);
+  String r = atSend(cmd, 8000, false);
+  bool ok    = r.indexOf("OK") >= 0;
   bool ready = r.indexOf("READY") >= 0;
-  if (!ready) {
-    String acc;
+
+  if (!ready) {                              // ventana corta, solo para saber
+    String acc;                              // si algun dia el URC aparece
     uint32_t w0 = millis();
-    while (millis() - w0 < 30000UL) {
+    while (millis() - w0 < READY_WAIT_MS) {
       while (SerialAT.available()) acc += (char)SerialAT.read();
       if (acc.indexOf("READY") >= 0) { ready = true; break; }
-      delay(20);
+      delay(10);
     }
     if (acc.length()) logf("[AT  ] < %s", oneLine(acc).c_str());
   }
-  logf("[GNSS] CGNSSPWR=1 -> %s tras %lu ms",
-       ready ? "READY" : "sin READY", (unsigned long)(millis() - t0));
+  logf("[GNSS] %s -> %s%s tras %lu ms", cmd, ok ? "OK" : "SIN OK",
+       ready ? " + READY" : " (sin READY, normal en este firmware)",
+       (unsigned long)(millis() - t0));
+
+  // Los comandos de arranque forzado pueden no existir o no encender el motor.
+  // Se comprueba y, si hace falta, se cae al camino de siempre sin perder la
+  // corrida: el cronometro se reinicia en el CGNSSPWR=1 real.
+  if (st != START_PWR) {
+    String pwr = fieldAfter(atSend("AT+CGNSSPWR?", 3000, false), "+CGNSSPWR:");
+    bool engineOn = ok && pwr.indexOf("1") >= 0;
+    logf("[GNSS] tras %s el motor esta %s (CGNSSPWR? = %s)",
+         cmd, engineOn ? "ENCENDIDO" : "apagado", pwr.c_str());
+    if (!engineOn) {
+      noteOut = String(cmd) + (ok ? " no encendio el motor" : " no soportado");
+      noteOut += "; medido con CGNSSPWR=1";
+      logf("[GNSS] %s", noteOut.c_str());
+      t0 = millis();
+      atSend("AT+CGNSSPWR=1", 6000, false);
+    } else {
+      noteOut = String(cmd) + " arranco el motor";
+    }
+  }
+
   readyOut = ready;
   return t0;
 }
@@ -476,7 +614,6 @@ static void coolDown(const char *tag) {
 
 // =============================================================================
 //  Baseline de cielo: exige un fix crudo antes de seguir.
-//  Sirve de filtro en interiores y deja el NVRAM caliente y comparable.
 // =============================================================================
 static bool warmBaseline(const char *tag) {
   Serial.println();
@@ -486,7 +623,8 @@ static bool warmBaseline(const char *tag) {
   Serial.println("-----------------------------------------------------------------");
 
   bool ready = false;
-  uint32_t t0 = gnssOn(ready);
+  String note = "-";
+  uint32_t t0 = gnssStart(START_PWR, ready, note);
 
   uint32_t nextPoll = millis();
   int  idx = 0, bestSats = 0;
@@ -529,11 +667,11 @@ static bool warmBaseline(const char *tag) {
 // =============================================================================
 //  Ejecucion de una corrida
 // =============================================================================
-static void runOne(const RunCfg &cfg, RunResult &out) {
+static void runOne(const RunCfg &cfg, RunResult &out, bool coolAfter) {
   Serial.println();
   Serial.println("-----------------------------------------------------------------");
-  logf("[%s  ] INICIO  %s   pre=%s  post=%s",
-       cfg.id, cfg.label, preName(cfg.pre), postName(cfg.post));
+  logf("[%s  ] INICIO  %s   pre=%s  start=%s",
+       cfg.id, cfg.label, preName(cfg.pre), startName(cfg.start));
   Serial.println("-----------------------------------------------------------------");
 
   out.ran  = true;
@@ -542,21 +680,31 @@ static void runOne(const RunCfg &cfg, RunResult &out) {
 
   // ---- variable bajo prueba -------------------------------------------------
   switch (cfg.pre) {
-    case PRE_CPOF_PWRKEY:  out.note = modemColdCycle();    break;
-    case PRE_CRESET:       out.note = modemReset();        break;
-    case PRE_DTR_SLEEP:    out.note = dtrSleepCycle();     break;
-    case PRE_PWRKEY_PULSE: out.note = pwrkeyOnLiveModem(); break;
-    default:               out.note = "-";                 break;
+    case PRE_LONG_OFF:        out.note = longOffWait();                    break;
+    case PRE_DTR_SLEEP:       out.note = dtrSleepCycle(DTR_SLEEP_S);       break;
+    case PRE_DTR_SLEEP_SHORT: out.note = dtrSleepCycle(DTR_SLEEP_SHORT_S); break;
+    case PRE_CSCLK_AWAKE:     out.note = csclkAwake();                     break;
+    case PRE_CPOF_PWRKEY:     out.note = modemColdCycle();                 break;
+    case PRE_CRESET:          out.note = modemReset();                     break;
+    case PRE_PWRKEY_PULSE:    out.note = pwrkeyOnLiveModem();              break;
+    default:                  out.note = "-";                              break;
   }
 
-  // ---- que recuerda el NVRAM antes de encender ------------------------------
-  out.modeBefore = fieldAfter(atSend("AT+CGNSSMODE?", 3000, false), "+CGNSSMODE:");
-  logf("[%s  ] CGNSSMODE antes de encender: %s", cfg.id, out.modeBefore.c_str());
+  // Cuanto lleva el GNSS apagado justo antes de encenderlo: la variable que
+  // confundia la lectura de R3 en la v1.1. Ahora queda medida y en el CSV.
+  out.offTotalS = gnssOffSinceMs ? (millis() - gnssOffSinceMs) / 1000UL : 0;
+  logf("[%s  ] GNSS lleva %lu s apagado al momento de encenderlo",
+       cfg.id, (unsigned long)out.offTotalS);
 
-  // ---- encendido del GNSS, igual que pmGnssOn() -----------------------------
+  // ---- arranque del motor GNSS ---------------------------------------------
   bool ready = false;
-  uint32_t t0 = gnssOn(ready);
-  if (!ready && out.note == "-") out.note = "CGNSSPWR=1 sin READY";
+  String startNote = "-";
+  uint32_t t0 = gnssStart(cfg.start, ready, startNote);
+  out.ready = ready;
+  if (startNote != "-") {
+    if (out.note == "-") out.note = startNote;
+    else                 out.note += "; " + startNote;
+  }
 
   if (cfg.post == POST_BAUD || cfg.post == POST_BAUD_MODE) {
     atSend("AT+CGNSSIPR=115200", 3000, false);
@@ -580,6 +728,14 @@ static void runOne(const RunCfg &cfg, RunResult &out) {
     GnssSample s = gnssPoll();
     if (!s.hasTag)      out.pollsError++;
     else if (!s.hasFix) out.pollsEmpty++;
+
+    // Trama envenenada: lat/lon presentes pero sin satelites ni HDOP. Es la
+    // ultima posicion conocida, no una medida. El gate de main.cpp la mata.
+    bool poisoned = s.hasFix && (s.sats == 0 || s.hdop <= 0.0f);
+    if (poisoned) {
+      logf("[%s  ] t=%lus TRAMA FANTASMA: fix con sats=%d hdop=%.1f (posicion vieja)",
+           cfg.id, (unsigned long)((millis() - t0) / 1000), s.sats, s.hdop);
+    }
 
     bool passesGate = s.hasFix &&
                       s.sats >= MIN_VALID_SATELLITES &&
@@ -611,7 +767,6 @@ static void runOne(const RunCfg &cfg, RunResult &out) {
       lastSats = s.sats;
     }
 
-    // En interiores el gate casi nunca pasa: no gastes el techo entero.
     if (graceDeadline && !out.fixValid && millis() > graceDeadline) {
       logf("[%s  ] fix crudo sin pasar el gate en %lu s de gracia: corto aqui",
            cfg.id, (unsigned long)POSTFIX_GRACE_S);
@@ -633,7 +788,7 @@ static void runOne(const RunCfg &cfg, RunResult &out) {
 
   gnssOff();
   logf("[%s  ] FIN", cfg.id);
-  coolDown(cfg.id);
+  if (coolAfter) coolDown(cfg.id);
 }
 
 // =============================================================================
@@ -649,7 +804,7 @@ static void printSummary() {
 
   Serial.println();
   Serial.println("=================================================================");
-  Serial.println(" RESUMEN GNSS LAB");
+  Serial.println(" RESUMEN GNSS LAB 1.2 - desempate del sueno por DTR");
   Serial.println("=================================================================");
   if (skyOk) {
     Serial.printf(" cielo (baseline): fix crudo en %lu s, sats %d, hdop %.1f\r\n",
@@ -657,13 +812,14 @@ static void printSummary() {
   } else {
     Serial.println(" cielo (baseline): SIN FIX. El sitio no da para esta prueba.");
   }
-  if (rechargesUsed) Serial.printf(" recargas de NVRAM usadas: %d\r\n", rechargesUsed);
+  if (cmdSupport.length())  Serial.printf(" comandos de arranque: %s\r\n", cmdSupport.c_str());
+  if (rechargesUsed)        Serial.printf(" recargas de NVRAM usadas: %d\r\n", rechargesUsed);
   if (abortReason.length()) Serial.printf(" ABORTADO: %s\r\n", abortReason.c_str());
   Serial.println("-----------------------------------------------------------------");
 
-  Serial.printf("%-3s %-13s %-13s %-10s %8s %8s %5s %5s %6s %5s %8s %9s  %s\r\n",
-                "run", "variable", "pre", "post", "ttff_raw", "ttff_val",
-                "sats", "hdop", "vacios", "err", "mode_pre", "mode_post", "nota");
+  Serial.printf("%-3s %-14s %-14s %-9s %7s %8s %8s %5s %5s %6s %5s %6s  %s\r\n",
+                "run", "variable", "pre", "start", "off_s", "ttff_raw", "ttff_val",
+                "sats", "hdop", "vacios", "err", "ready", "nota");
 
   for (int i = 0; i < RUN_COUNT; i++) {
     if (!results[i].ran) continue;
@@ -678,52 +834,56 @@ static void printSummary() {
     if (r.hdop > 0)  snprintf(hdop, sizeof(hdop), "%.1f", r.hdop);
     else             snprintf(hdop, sizeof(hdop), "-");
 
-    Serial.printf("%-3s %-13s %-13s %-10s %8s %8s %5s %5s %6u %5u %8s %9s  %s\r\n",
-                  RUNS[i].id, RUNS[i].label, preName(RUNS[i].pre), postName(RUNS[i].post),
-                  raw, val, sats, hdop,
+    Serial.printf("%-3s %-14s %-14s %-9s %6lus %8s %8s %5s %5s %6u %5u %6s  %s\r\n",
+                  RUNS[i].id, RUNS[i].label, preName(RUNS[i].pre), startName(RUNS[i].start),
+                  (unsigned long)r.offTotalS, raw, val, sats, hdop,
                   (unsigned)r.pollsEmpty, (unsigned)r.pollsError,
-                  r.modeBefore.c_str(), r.modeAfter.c_str(), r.note.c_str());
+                  r.ready ? "si" : "no", r.note.c_str());
   }
 
   Serial.println();
   Serial.println("=== CSV (pegar en el log de sesion) ===");
-  Serial.println("run,variable,pre,post,ttff_raw_s,ttff_valid_s,sats,hdop,"
-                 "polls_vacios,polls_error,polls_total,mode_pre,mode_post,vbat,nota");
+  Serial.println("run,variable,pre,start,off_s,ttff_raw_s,ttff_valid_s,sats,hdop,"
+                 "polls_vacios,polls_error,polls_total,ready,mode_post,vbat,nota");
   for (int i = 0; i < RUN_COUNT; i++) {
     if (!results[i].ran) continue;
     RunResult &r = results[i];
     String note = r.note;
     note.replace(",", ";");
-    Serial.printf("%s,%s,%s,%s,%ld,%ld,%d,%.1f,%u,%u,%u,%s,%s,%.2f,%s\r\n",
-                  RUNS[i].id, RUNS[i].label, preName(RUNS[i].pre), postName(RUNS[i].post),
+    Serial.printf("%s,%s,%s,%s,%lu,%ld,%ld,%d,%.1f,%u,%u,%u,%s,%s,%.2f,%s\r\n",
+                  RUNS[i].id, RUNS[i].label, preName(RUNS[i].pre), startName(RUNS[i].start),
+                  (unsigned long)r.offTotalS,
                   r.fixRaw   ? (long)(r.ttffRawMs / 1000) : -1L,
                   r.fixValid ? (long)(r.ttffValMs / 1000) : -1L,
                   r.fixValid ? r.sats : -1,
                   r.hdop,
                   (unsigned)r.pollsEmpty, (unsigned)r.pollsError, (unsigned)r.pollsTotal,
-                  r.modeBefore.c_str(), r.modeAfter.c_str(), r.batV, note.c_str());
+                  r.ready ? "si" : "no", r.modeAfter.c_str(), r.batV, note.c_str());
   }
-  Serial.printf("P0,baseline_cielo,-,-,%ld,-1,%d,%.1f,0,0,0,-,-,0.00,%s\r\n",
+  Serial.printf("P0,baseline_cielo,-,cgnsspwr,0,%ld,-1,%d,%.1f,0,0,0,no,-,0.00,%s\r\n",
                 skyOk ? (long)(skyTtffMs / 1000) : -1L, skySats, skyHdop,
                 skyOk ? "cielo suficiente" : "sin fix en el baseline");
   Serial.println("=== fin CSV ===");
   Serial.println();
 
-  Serial.println("Lectura rapida:");
-  Serial.println(" - R1 corto y otra corrida larga -> esa es la culpable, F19 = no hacer eso.");
-  Serial.println(" - R1 tambien largo -> el NVRAM no retiene: F19 muere, va F23 (ventana de gracia).");
-  Serial.println(" - ttff_raw corto y ttff_valid largo -> el problema es el gate, no el NVRAM.");
-  Serial.println(" - R5 con nota 'el pulso APAGO el modem' -> hay que guardar rtcModemAlive de verdad.");
+  Serial.println("Como se lee:");
+  Serial.println(" - T1 corto, T2 corto, T3 largo -> lo rompe el sueno por DTR, no el tiempo.");
+  Serial.println("   Produccion: no dormir el modem en paradas cortas, o usar T8 (hot tras sueno).");
+  Serial.println(" - T1 corto, T2 largo, T3 largo -> lo rompe el tiempo apagado. El sueno es");
+  Serial.println("   inocente y F23 (ventana de gracia) cubre el caso; no hay 90 s que ganar.");
+  Serial.println(" - T1, T2 y T3 los tres cortos -> el 120 s de R3 fue ruido de una sola muestra.");
+  Serial.println(" - T4 o T5 por debajo de T1 -> hay comando de arranque asistido y vale oro:");
+  Serial.println("   entra en F19 antes que cualquier otra cosa.");
+  Serial.println(" - T4/T5 con nota 'no soportado' -> este firmware no los tiene, se cierra el tema.");
+  Serial.println(" - ready=si en alguna corrida -> el URC READY si existe y hay que revisar F19.");
   if (anyRaw && !anyGate) {
     Serial.println();
     Serial.println(" AVISO: ninguna corrida paso el gate de calidad (tipico en interiores).");
-    Serial.println(" Compara solo la columna ttff_raw entre corridas; el veredicto sigue siendo");
-    Serial.println(" valido para F19 porque todas las corridas midieron en el mismo sitio.");
+    Serial.println(" Compara solo ttff_raw entre corridas; todas midieron en el mismo sitio.");
   }
   if (!anyRaw) {
     Serial.println();
-    Serial.println(" AVISO: ninguna corrida consiguio fix. Prueba no concluyente: repite en");
-    Serial.println(" exteriores con la antena al cielo abierto.");
+    Serial.println(" AVISO: ninguna corrida consiguio fix. No concluyente: repite en exteriores.");
   }
   Serial.println();
   Serial.println("Este env NO es el tracker. Para volver a produccion:");
@@ -737,9 +897,6 @@ static void printSummary() {
 static void banner() {
   int enabled = 0;
   for (int i = 0; i < RUN_COUNT; i++) if (RUNS[i].enabled) enabled++;
-  unsigned long worstMin =
-    (unsigned long)(((PREFLIGHT_TIMEOUT_S + GNSS_OFF_WAIT_S) +
-                     enabled * (FIX_TIMEOUT_S + GNSS_OFF_WAIT_S + 90UL)) / 60UL);
 
   Serial.println();
   Serial.println("=================================================================");
@@ -750,18 +907,35 @@ static void banner() {
   Serial.printf(" reset    : %s\r\n", resetReasonName());
   Serial.printf(" corridas : %d activas, techo %lu s de fix, %lu s de enfriado\r\n",
                 enabled, (unsigned long)FIX_TIMEOUT_S, (unsigned long)GNSS_OFF_WAIT_S);
-  Serial.printf(" duracion : hasta ~%lu min en el peor caso\r\n", worstMin);
+  Serial.println(" sondeo   : cada 1 s desde el instante del comando de arranque");
   Serial.println(" gate     : sats >= 5 y HDOP <= 2.5 (igual que main.cpp)");
   Serial.printf(" filtro   : P0 exige fix crudo en %lu s o aborta\r\n",
                 (unsigned long)PREFLIGHT_TIMEOUT_S);
+  Serial.println(" duracion : ~25-30 min tipico, hasta ~45 min en el peor caso");
   Serial.println("=================================================================");
-  Serial.println("  P0 baseline_cielo  filtro y NVRAM caliente");
+  Serial.println("  P0 baseline_cielo  filtro de sitio y efemerides frescas");
   for (int i = 0; i < RUN_COUNT; i++) {
-    Serial.printf("  %s %-13s pre=%-13s post=%-10s %s\r\n",
+    Serial.printf("  %s %-15s pre=%-14s start=%-9s %s\r\n",
                   RUNS[i].id, RUNS[i].label, preName(RUNS[i].pre),
-                  postName(RUNS[i].post), RUNS[i].enabled ? "" : "(desactivada)");
+                  startName(RUNS[i].start), RUNS[i].enabled ? "" : "(desactivada)");
   }
   Serial.println("=================================================================");
+}
+
+// Solo pregunta si el comando existe. La sintaxis de test no arranca nada.
+static void probeStartCommands() {
+  struct { const char *test; const char *label; } probes[] = {
+    { "AT+CGPSHOT=?",  "CGPSHOT"  },
+    { "AT+CGPSWARM=?", "CGPSWARM" },
+    { "AT+CGPSCOLD=?", "CGPSCOLD" },
+  };
+  for (unsigned i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+    String r = atSend(probes[i].test, 3000, false);
+    bool ok = r.indexOf("OK") >= 0;
+    if (cmdSupport.length()) cmdSupport += " ";
+    cmdSupport += String(probes[i].label) + "=" + (ok ? "si" : "no");
+  }
+  logf("[LAB ] soporte de comandos de arranque: %s", cmdSupport.c_str());
 }
 
 void setup() {
@@ -809,14 +983,13 @@ void setup() {
   atSend("AT+SIMCOMATI", 5000, false);
   atSend("AT+CSCLK?", 3000, false);
   atSend("AT+CGNSSPWR?", 3000, false);
-  atSend("AT+CGNSSMODE?", 3000, false);
-  atSend("AT+CGNSSCOLD=?", 3000, false);   // solo existencia, no lo ejecuta
+  probeStartCommands();
 
   logf("[LAB ] dejo el GNSS apagado 20 s para partir de un estado conocido");
   gnssOff();
   delay(20000);
 
-  // ---- P0: filtro de sitio -------------------------------------------------
+  // ---- P0: filtro de sitio y efemerides frescas ----------------------------
   if (!warmBaseline("P0")) {
     abortReason = "sin fix en el baseline: sitio insuficiente, repetir en exteriores";
     logf("[LAB ] %s", abortReason.c_str());
@@ -828,26 +1001,26 @@ void setup() {
   // ---- corridas ------------------------------------------------------------
   for (int i = 0; i < RUN_COUNT; i++) {
     if (!RUNS[i].enabled) continue;
-    runOne(RUNS[i], results[i]);
 
-    if (results[i].fixRaw) continue;
-
-    // Sin fix crudo el NVRAM queda frio y la corrida siguiente no seria
-    // comparable. Recargo con un baseline antes de continuar.
     bool anyLeft = false;
     for (int j = i + 1; j < RUN_COUNT; j++) if (RUNS[j].enabled) { anyLeft = true; break; }
-    if (!anyLeft) break;
 
+    runOne(RUNS[i], results[i], anyLeft);
+
+    if (results[i].fixRaw || !anyLeft) continue;
+
+    // Sin fix crudo las efemerides quedan frias y la corrida siguiente no
+    // seria comparable. Recargo con un baseline antes de continuar.
     if (rechargesUsed >= MAX_RECHARGES) {
-      abortReason = "dos recargas de NVRAM ya usadas y sigue sin fijar: no concluyente";
+      abortReason = "dos recargas ya usadas y sigue sin fijar: no concluyente";
       logf("[LAB ] %s", abortReason.c_str());
       break;
     }
     rechargesUsed++;
-    logf("[LAB ] recarga de NVRAM %d/%d antes de la corrida siguiente",
+    logf("[LAB ] recarga de efemerides %d/%d antes de la corrida siguiente",
          rechargesUsed, MAX_RECHARGES);
     if (!warmBaseline("Pr")) {
-      abortReason = "la recarga de NVRAM no consiguio fix: repetir en exteriores";
+      abortReason = "la recarga no consiguio fix: repetir en exteriores";
       logf("[LAB ] %s", abortReason.c_str());
       break;
     }
