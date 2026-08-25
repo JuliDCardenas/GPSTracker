@@ -9,7 +9,8 @@
 // SerialMon, wakeCause, lastValidPoint, ignState, pendingEvent, readPinVolts(),
 // readBatteryVolts(), batteryReadingPlausible(), publishStatus(),
 // publishPoint(), serviceEvents(), tryConnectMQTT(), ensureLTE(), waitForAT(),
-// modemPowerOn(), watchdogFeed() y gnssPwrOn() de gnss_prod.h.
+// modemPowerOn(), watchdogFeed() y gnssPwrOn() de gnss_prod.h. Tambien usa
+// fixAgeS() y rtcFixAgeS de tracker_telemetry.h, que se incluye ANTES.
 //
 // Se partio porque main.cpp llego a 67 KB y ya no se podia reescribir de una
 // sola pasada con herramientas remotas: el 2026-08-22 un intento dejo el
@@ -24,6 +25,16 @@ static RTC_DATA_ATTR bool     rtcInCutoff     = false;
 static RTC_DATA_ATTR uint32_t rtcSleptSeconds = 0;
 static RTC_DATA_ATTR uint32_t rtcAwakeMs      = 0;      // fraccion de segundo acumulada
 static RTC_DATA_ATTR uint8_t  rtcStrikes      = 0;
+
+// F24 (2026-08-24). Despertares por ext0 que NO se sostuvieron el antirrebote,
+// o sea picos electricos en el pin de ignicion. Ver el analisis completo en
+// tracker_wake.h, wakeConfirmExt0().
+//
+// Vive en RTC a proposito: un despertar espurio ahora se vuelve a dormir antes
+// de encender el modem, asi que no deja rastro en el broker. Este contador es lo
+// unico que queda de el, y sale por sys/wake en el siguiente arranque real. Si
+// amanece en spur=5 sin una sola publicacion nocturna, los picos son reales.
+static RTC_DATA_ATTR uint16_t rtcSpuriousExt0 = 0;
 
 static inline float cutoffV()  { return BAT_CUTOFF_V  + TEST_BAT_OFFSET_V; }
 static inline float recoverV() { return BAT_RECOVER_V + TEST_BAT_OFFSET_V; }
@@ -40,6 +51,12 @@ static bool pmVbusPresent() { return readPinVolts() >= PIN_ON_V; }
 // SIN NINGUNA fuente de despertar: el equipo quedaba muerto hasta que se le
 // quitara la alimentacion a mano. Ahora es imposible salir de aqui sin al
 // menos una fuente armada, y se deja constancia en el serial.
+//
+// NOTA (2026-08-24): el caso de "pin alto justo al dormirse" dejo de ser
+// teorico. Esa madrugada paso de verdad y, combinado con el || de setup(), dejo
+// el tracker sordo 1 h 32 min manejando. El || ya esta corregido en
+// tracker_wake.h: el repaso por temporizador ahora decide del pin, asi que
+// aunque ext0 no quede armado el equipo se recupera solo en PARKED_POLL_S.
 static void pmDeepSleep(bool wakeOnIgnition, uint32_t timerSeconds) {
   bool ext0Armed = false;
 
@@ -286,6 +303,11 @@ static void pmEnterParked() {
   rtcSleptSeconds = 0;
   rtcAwakeMs      = 0;
 
+  // F26: se congela la edad de la posicion en cache antes de dormir. millis()
+  // se reinicia en el proximo arranque, asi que lo que llevamos despiertos hay
+  // que guardarlo aqui o se pierde.
+  rtcFixAgeS = fixAgeS();
+
   SerialMon.println("[PM] parqueado -> deep sleep");
   pmDeepSleep(true, PARKED_POLL_S);
 }
@@ -299,6 +321,11 @@ static void pmParkedTick() {
   // No es cosmetico: de este estado depende el campo ignition del CSV, y con
   // ignition=1 el subscriber tira el pulso con "Skip: no_move". Los 5 pulsos
   // de la noche del 19 al 20 se perdieron exactamente asi.
+  //
+  // NOTA (2026-08-24): "con el pin de ignicion bajo" ahora es cierto de verdad.
+  // Hasta hoy la condicion de entrada mordia primero el ignState del RTC por un
+  // || mal puesto, y se podia llegar aqui con el carro andando. Ver
+  // wakeServiceTimerTick() en tracker_wake.h.
   ignState = IGN_OFF;
 
   // El reloj de parqueo cuenta sueno NOMINAL mas tiempo REALMENTE despierto.
@@ -312,6 +339,11 @@ static void pmParkedTick() {
   rtcAwakeMs += millis();
   rtcSleptSeconds += PARKED_POLL_S + (rtcAwakeMs / 1000);
   rtcAwakeMs %= 1000;
+
+  // F26: la posicion en cache envejece mientras dormimos. Aqui basta con el
+  // sueno nominal: el tiempo despierto de un repaso es medio segundo y la guarda
+  // de antiguedad trabaja con un umbral de minutos.
+  rtcFixAgeS += PARKED_POLL_S;
 
   float v = readBatteryVolts();
 
