@@ -3,99 +3,99 @@
 Este documento ha sido generado para que tú y tu socio (a través de Notion AI) tengáis visibilidad total de los cambios propuestos en la arquitectura del firmware.
 
 ## Objetivo Principal
-El objetivo de este refactor es **puramente arquitectónico**. El firmware actual funciona de manera excelente en producción y la lógica de negocio (gestión de energía, reportes GNSS, lógica de ignición y LWT MQTT) ha sido probada exhaustivamente. 
-
-Actualmente, el código sufre de un antipatrón en el que la lógica de negocio vive en archivos `.h` (como `tracker_pm.h` o `tracker_telemetry.h`) que se incrustan en medio de `main.cpp` para acceder a variables globales. Vamos a transformar esos archivos en **Clases de C++ verdaderas** (`.cpp` y `.h`), inyectando las dependencias necesarias.
+El objetivo de este refactor es **puramente arquitectónico**. El firmware actual funciona de manera excelente en producción. Vamos a transformar los archivos `.h` espagueti en **Clases de C++ verdaderas** (`.cpp` y `.h`), inyectando las dependencias necesarias.
 
 > [!IMPORTANT]
-> **Funcionalidad 100% Idéntica:** Este refactor NO alterará el comportamiento del dispositivo. Los tópicos MQTT, el manejo de la batería, las reglas de ignición y los tiempos de latencia del Nivel 2 de energía seguirán funcionando **exactamente igual**. Solo cambiará la organización interna del código.
+> **Funcionalidad 100% Idéntica:** Este refactor NO alterará el comportamiento del dispositivo.
 
 ## User Review Required
 
 Se requiere la aprobación del usuario para iniciar la refactorización descrita a continuación. Ningún archivo será modificado hasta que no hagas clic en "Proceed" o des tu aprobación explícita.
 
-## ⚠️ CRÍTICO: Gestión de Memoria RTC (RTC_DATA_ATTR)
-Como bien identificó el equipo, el ESP32 no permite persistir variables de instancia de clases en la memoria RTC (RTC Slow Memory). Si las variables de estado pasan a ser campos ordinarios de una clase C++, se alojarán en `.bss` o en el *heap* y se destruirán durante el *deep sleep*, rompiendo toda la lógica del Nivel 2.
+## Decisiones Críticas de Arquitectura (Parches de Diseño)
 
-Para solucionar esto manteniendo una arquitectura orientada a objetos, aplicaremos el **Patrón de Estado Inyectado**:
-1. Agruparemos las variables RTC en estructuras `struct` simples (Plain Old Data - POD).
-2. Estas estructuras se instanciarán de forma estática en `main.cpp` o en un módulo dedicado, con el atributo `RTC_DATA_ATTR`.
-3. Pasaremos una **referencia** de estas estructuras a los constructores de nuestras clases.
+Gracias a una revisión exhaustiva del diseño original, hemos identificado y parcheado 4 huecos arquitectónicos críticos antes de escribir una sola línea de código:
 
-Ejemplo de cómo se verá:
-```cpp
-// En types.h
-struct RtcPowerState {
-    bool modemAlive;
-    bool inCutoff;
-    uint32_t bootCount;
-    // ...
-};
+### 1. Gestión de Memoria RTC (RTC_DATA_ATTR)
+El ESP32 no permite persistir variables de instancia de clases en la memoria RTC. 
+**Solución:** Agruparemos las variables RTC en estructuras `struct` simples (ej. `RtcPowerState`). Estas estructuras se instanciarán de forma estática y global en `main.cpp` con `RTC_DATA_ATTR`, y pasaremos una **referencia** de estas estructuras a los constructores de nuestras clases.
 
-// En main.cpp
-static RTC_DATA_ATTR RtcPowerState rtcPower = {0};
+### 2. Flujo de Ejecución y Métodos `[[noreturn]]`
+Las funciones que llaman a `esp_deep_sleep_start()` (como `pmDeepSleep()` y `pmParkedTick()`) **nunca retornan**. El modelo mental de "el loop llama a `powerManager.service()` y sigue" es falso si este decide dormir.
+**Solución:** 
+- Renombraremos estos métodos a nombres explícitos: `enterParkedAndSleep()` y `sleepNow()`.
+- Usaremos el atributo estándar de C++ `[[noreturn]]` en sus declaraciones para que el compilador y el lector humano sepan que la ejecución termina ahí.
 
-// En PowerManager.cpp, la clase accede a _rtcState.modemAlive
-PowerManager::PowerManager(TinyGsm& modem, RtcPowerState& state) : _rtcState(state) {}
-```
-De esta forma, las clases se mantienen puras (sin dependencias globales) pero mutan directamente la memoria RTC que sobrevive al sueño.
+### 3. Resolviendo la Dependencia Circular
+Actualmente, Energía llama a Telemetría (`serviceEvents()`, `publishPoint()`) y Telemetría necesita a GNSS. Si las referenciamos mutuamente en los constructores, creamos un huevo y la gallina, exponiéndonos a punteros nulos durante el `setup()`.
+**Solución:** Desacoplaremos los constructores. `PowerManager` **no** guardará una referencia a `TelemetryManager` en su estado interno. En su lugar, cuando Energía necesite parquear o ejecutar un corte (y por ende publicar el último punto), recibirá la instancia de Telemetría explícitamente en el llamado del método:
+`[[noreturn]] void enterParkedAndSleep(TelemetryManager& telemetry);`
+Esto garantiza que la dependencia siempre sea válida en el momento de uso y elimina el ciclo en los constructores.
+
+### 4. Aislamiento en `platformio.ini`
+Los entornos de prueba de PlatformIO (`gnss_lab`, `adc_sense`, etc.) usan filtros manuales restando archivos específicos (`-<main.cpp>`). Si añadimos nuevos `.cpp` a la carpeta `src/`, se colarán en todos los binarios de prueba por culpa del comportamiento por defecto de PlatformIO (`+<*>`).
+**Solución:** Actualizaremos `platformio.ini` para usar un enfoque de *whitelist* estricto en cada entorno:
+`build_src_filter = +<*> -<*> +<archivo_deseado.cpp>`
+Para el entorno `tracker`, explícitamente incluiremos `main.cpp` y nuestros tres nuevos managers.
+
+### 5. Centralización de Constantes
+Actualmente todos los `#define` de comportamiento (umbrales de batería, cadencias, calibraciones ADC) viven en `main.cpp`. Al separar el código en clases, estas perderán acceso a dichos valores.
+**Solución:** Crearemos `config.h` para alojar todas las constantes de negocio y configuración, dejándolo como la única fuente de verdad para parámetros como `TEST_PULSE_S` y `PIN_ON_V`.
+
+---
 
 ## Proposed Changes
 
-A continuación se detalla cómo se reorganizará el código fuente.
+A continuación se detalla la nueva estructura de archivos.
 
-### Estructuras de Datos Globales y RTC
-Se creará un archivo compartido para definir los tipos básicos y las estructuras de estado RTC.
+### Archivos Compartidos y Configuración
+
+#### [NEW] [config.h](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/include/config.h)
+- Único lugar para los `#define` (ej: `BAT_CUTOFF_V`, `PARKED_POLL_S`, `TEST_FORCE_PARKED`). Se añadirá una advertencia gigante sobre el peligro de dejar activos los flags de TEST en producción.
 
 #### [NEW] [types.h](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/include/types.h)
-- Contendrá la definición de la estructura `GpsPoint`.
-- Contendrá los `enum` relacionados (como `IgnState` y `PendingEvent`).
-- Contendrá las estructuras `RtcPowerState`, `RtcTelemetryState` y `RtcGnssState`.
+- Definición de la estructura `GpsPoint`, los `enum` (`IgnState`, `PendingEvent`) y las estructuras de estado RTC (`RtcPowerState`, `RtcTelemetryState`, `RtcGnssState`).
+
+#### [MODIFY] [platformio.ini](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/platformio.ini)
+- Refactorización de todos los `build_src_filter` para usar listas blancas (`+<*> -<*> +<archivos>`) impidiendo que las nuevas clases rompan los entornos de prueba.
 
 ---
 
 ### Componente: Motor GNSS
-Se migrará `gnss_prod.h` a una clase.
 
 #### [NEW] [GnssManager.h](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/include/GnssManager.h)
 #### [NEW] [GnssManager.cpp](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/src/GnssManager.cpp)
-- **Responsabilidad:** Encender el módulo GPS sin bloquear, obtener fixes y gestionar la detección de "tramas rancias".
-- **Dependencias Inyectadas:** `TinyGsm& modem` y `RtcGnssState& rtcState` (para `rtcGnssStale`).
+- **Responsabilidad:** Encendido asíncrono y guardia de tramas rancias.
+- **Inyección:** `TinyGsm& modem`, `RtcGnssState& rtcState`.
 #### [DELETE] [gnss_prod.h](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/include/gnss_prod.h)
 
 ---
 
 ### Componente: Telemetría
-Se migrará `tracker_telemetry.h` a su respectiva clase.
 
 #### [NEW] [TelemetryManager.h](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/include/TelemetryManager.h)
 #### [NEW] [TelemetryManager.cpp](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/src/TelemetryManager.cpp)
-- **Responsabilidad:** Orquestar la captura de datos GNSS, formato CSV e interactuar con el cliente MQTT para su publicación.
-- **Dependencias Inyectadas:** `TinyGsm& modem`, `PubSubClient& mqtt`, referencia a `GnssManager` y `RtcTelemetryState& rtcState` (para `lastValidPoint`, `pendingEvent`, `ignState`, `bootStatusPublished`).
+- **Responsabilidad:** Orquestar captura GNSS y publicación MQTT.
+- **Inyección:** `TinyGsm& modem`, `PubSubClient& mqtt`, `GnssManager& gnss`, `RtcTelemetryState& rtcState`.
 #### [DELETE] [tracker_telemetry.h](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/include/tracker_telemetry.h)
 
 ---
 
-### Componente: Gestión de Energía (Power Management)
-Se migrará `tracker_pm.h` aislando la gestión de *deep sleep* y batería.
+### Componente: Gestión de Energía
 
 #### [NEW] [PowerManager.h](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/include/PowerManager.h)
 #### [NEW] [PowerManager.cpp](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/src/PowerManager.cpp)
-- **Responsabilidad:** Lectura del voltaje (ADC), control del pin DTR, corte por bajo voltaje y *Deep Sleep* en Nivel 2.
-- **Dependencias Inyectadas:** `TinyGsm& modem`, `TinyGsmClient& netClient`, `PubSubClient& mqtt`, y `RtcPowerState& rtcState`.
+- **Responsabilidad:** DTR del módem, ADC de ignición/batería, y *Deep Sleep* (`[[noreturn]]`).
+- **Inyección:** `TinyGsm& modem`, `TinyGsmClient& netClient`, `PubSubClient& mqtt`, `RtcPowerState& rtcState`.
 #### [DELETE] [tracker_pm.h](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/include/tracker_pm.h)
 
 ---
 
-### Componente Principal (Main)
-El orquestador final.
+### Componente Principal
 
 #### [MODIFY] [main.cpp](file:///c:/Users/julia/Documents/PlatformIO/Projects/GPS%20Tracker%20Logan/src/main.cpp)
-- **Cambios:** Instanciación de las estructuras `RTC_DATA_ATTR` estáticas. Se inicializarán los gestores (`PowerManager`, `TelemetryManager`, `GnssManager`) pasándoles las instancias de RTC y dependencias de red.
+- Orquestador maestro. Definirá las instancias estáticas de RTC, creará los gestores y manejará el flujo principal.
 
 ## Verification Plan
-
-### Manual Verification
-1. **Compilación Exitosa:** Usaremos PlatformIO para garantizar que la reestructuración compila perfectamente y los enlaces (*linking*) son correctos.
-2. **Supervivencia del Estado RTC:** El usuario deberá verificar mediante *logging* que, tras un ciclo de parqueo, el tracker despierta conservando su `rtcBootCount` y su estado de módem.
-3. **Ejecución y Mantenimiento de Comportamiento:** Una vez flasheado el dispositivo por el usuario, se deberá verificar que se reporten posiciones válidas vía MQTT como antes y que el Nivel 2 de energía opere sin alteraciones.
+1. **Compilación y Linking:** Validar el entorno `tracker` y uno de prueba (`gnss_lab`) mediante PlatformIO.
+2. **Revisión Humana:** Validar que ninguna llamada de retorno espere ejecución tras un método `[[noreturn]]`.
