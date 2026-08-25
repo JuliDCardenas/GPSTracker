@@ -11,6 +11,40 @@
 // buildGpsQuality(), ignitionField(), isIgnitionOff(), currentPeriodMs(),
 // readBatteryVolts(), los TOPIC_* y las funciones de gnss_prod.h.
 //
+// Y al contrario, este archivo EXPORTA fixAgeS() y rtcFixAgeS, que usan
+// tracker_pm.h y tracker_wake.h. Los dos se incluyen despues: no cambiar ese
+// orden en main.cpp.
+//
+
+// ---------- Edad de la posicion en cache ----------
+// Segundos transcurridos desde el ultimo fix FRESCO. Se lleva a mano porque
+// millis() se reinicia en cada despertar y este firmware no tiene reloj propio
+// en el que confiar: el reloj del modem viene 15 s adelantado respecto al
+// servidor (medido 2026-08-24) y encima se pierde cuando el modem se apaga.
+//
+// El reparto de responsabilidades es:
+//   rememberPoint()  -> la pone en cero, es el unico sitio donde nace un fix
+//   fixAgeS()        -> suma lo que llevamos despiertos en este arranque
+//   pmEnterParked()  -> congela el total antes de dormir
+//   pmParkedTick()   -> le suma PARKED_POLL_S por cada repaso dormido
+static RTC_DATA_ATTR uint32_t rtcFixAgeS = 0;
+static uint32_t fixAgeBaseMs = 0;
+
+static inline uint32_t fixAgeS() {
+  return rtcFixAgeS + ((millis() - fixAgeBaseMs) / 1000);
+}
+
+// F26 (2026-08-24) — GUARDA DE ANTIGUEDAD PARA EL engine_on.
+//
+// Mas vieja que esto, la cache NO se republica al encender. El engine_off si la
+// quiere siempre, por vieja que sea, porque ese punto es el "aqui quedo
+// parqueado" y es el unico dato que Traccar va a tener del sitio.
+//
+// El numero es generoso a proposito: el TTFF de campo medido esta entre 3 y 4
+// minutos, asi que 5 minutos deja pasar el caso legitimo de una parada muy
+// corta donde la posicion vieja sigue siendo la buena, y corta los casos de
+// horas que son los que ensucian el mapa.
+#define FIX_MAX_AGE_S 300UL
 
 // ---------- Telemetria ----------
 // Lee el GNSS y, si el punto es valido, lo deja en out. Es bloqueante (AT+CGNSSINFO
@@ -102,6 +136,11 @@ static bool readGpsPoint(GpsPoint &out) {
 
 // Actualiza la cache y la marca de movimiento con un punto fresco.
 static void rememberPoint(const GpsPoint &p) {
+  // F26: este es el unico sitio del firmware donde nace un fix fresco, asi que
+  // es el unico sitio donde el reloj de antiguedad se pone en cero.
+  rtcFixAgeS   = 0;
+  fixAgeBaseMs = millis();
+
   lastValidPoint = p;
   if (p.speedValid && p.speed > MOVING_SPEED_KMH) {
     lastMovementMs = millis();
@@ -170,8 +209,19 @@ static void serviceEvents() {
     rememberPoint(fresh);
   }
 
-  publishPoint(lastValidPoint, eventName);
-  lastPublishMs = millis();
+  // F26 — GUARDA DE ANTIGUEDAD. Si el intento de arriba trajo un fix fresco,
+  // rememberPoint() ya puso el reloj en cero y esta guarda no estorba.
+  //
+  // Solo aplica al encender. El engine_off publica siempre, por viejo que sea el
+  // punto, porque es el unico registro del sitio donde quedo el carro.
+  if (isOn && fixAgeS() > FIX_MAX_AGE_S) {
+    SerialMon.printf("[PUB] engine_on sin punto: la cache tiene %lus (max %lus) -> se espera fix fresco\n",
+                     (unsigned long)fixAgeS(), (unsigned long)FIX_MAX_AGE_S);
+  } else {
+    publishPoint(lastValidPoint, eventName);
+    lastPublishMs = millis();
+  }
+
   pendingEvent = EV_NONE;
 }
 
