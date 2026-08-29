@@ -923,6 +923,8 @@ static void serviceMQTT() {
 #include "tracker_pm.h"
 #include "tracker_wake.h"
 
+static float bootPinV = 0.0f;
+
 void setup() {
   SerialMon.begin(115200);
 
@@ -966,7 +968,7 @@ void setup() {
 
   // Lectura informativa de arranque. El estado real se resuelve en el loop con
   // su antirrebote: hasta entonces IGN_UNKNOWN se comporta como encendido.
-  float bootPinV = readPinVolts();
+  bootPinV = readPinVolts();
   SerialMon.printf("[IGN] boot pin=%.3fV vbus=%.2fV (sense %s)\n",
                    bootPinV, bootPinV * DIVIDER_FACTOR,
                    IGNITION_SENSE_ENABLED ? "activo" : "desactivado");
@@ -1020,7 +1022,6 @@ void setup() {
   //    Ver la nota de tryConnectMQTT(): este primer intento falla de forma
   //    reproducible con state=-4 y conecta en el reintento del loop.
   tryConnectMQTT();
-  wakePublishForensics(bootPinV);
 
   // 3) GPS on
   //
@@ -1057,6 +1058,12 @@ void loop() {
 
   serviceMQTT();
   mqtt.loop();
+
+  static bool wakeForensicsDone = false;
+  if (!wakeForensicsDone && mqtt.connected()) {
+    wakePublishForensics(bootPinV);
+    wakeForensicsDone = true;
+  }
 
   serviceEvents();
   serviceTelemetry();
