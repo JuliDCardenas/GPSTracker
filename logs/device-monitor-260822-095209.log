@@ -1,0 +1,22 @@
+
+=================================================================
+ GPS Tracker Logan - GNSS LAB
+=================================================================
+ version  : gnss_lab 1.1
+ build    : Aug 22 2026 01:05:06
+ reset    : POWERON
+ corridas : 6 activas, techo 300 s de fix, 150 s de enfriado
+ duracion : hasta ~60 min en el peor caso
+ gate     : sats >= 5 y HDOP <= 2.5 (igual que main.cpp)
+ filtro   : P0 exige fix crudo en 240 s o aborta
+=================================================================
+  P0 baseline_cielo  filtro y NVRAM caliente
+  R0 cold_ref      pre=cpof+pwrkey   post=baud+mode  
+  R1 warm_ctrl     pre=nada          post=nada       
+  R2 creset        pre=creset        post=nada       
+  R3 dtr_sleep     pre=dtr_sleep     post=nada       
+  R4 cgnssmode15   pre=nada          post=baud+mode  
+  R5 pwrkey_pulse  pre=pwrkey_pulse  post=nada       
+  R6 baud_only     pre=nada          post=baud       (desactivada)
+=================================================================
+[    3.9s] [LAB ] arranco en 10 s (manda cualquier tecla para empezar ya)

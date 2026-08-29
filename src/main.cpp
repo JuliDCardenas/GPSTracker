@@ -921,6 +921,7 @@ static void serviceMQTT() {
 // arranque, corte por bajo voltaje y ciclo de parqueo. Va al final porque usa
 // publishPoint() y serviceEvents() del header anterior.
 #include "tracker_pm.h"
+#include "tracker_wake.h"
 
 void setup() {
   SerialMon.begin(115200);
@@ -995,12 +996,7 @@ void setup() {
   // un arranque completo con modem + LTE + MQTT + GNSS en cada repaso, que es
   // la forma mas rapida que existe de vaciar la 18650. Solo un pin francamente
   // alto significa ignicion encendida.
-#if !TEST_DISABLE_SLEEP
-  if (wakeCause == ESP_SLEEP_WAKEUP_TIMER &&
-      (isIgnitionOff() || bootPinV < PIN_ON_V)) {
-    pmParkedTick();         // NO retorna
-  }
-#endif
+  wakeServiceTimerTick(bootPinV);   // puede NO RETORNAR
 
   // Despertamos con la ignicion arriba (ext0) o es un arranque en frio: el
   // estado que quedo en RTC ya no describe el mundo. Se vuelve a IGN_UNKNOWN
@@ -1009,6 +1005,8 @@ void setup() {
   if (!coldBoot && wakeCause != ESP_SLEEP_WAKEUP_TIMER) {
     ignState = IGN_UNKNOWN;
   }
+
+  wakeConfirmExt0(coldBoot);        // puede NO RETORNAR
 
   // PWRKEY solo si el modem estaba apagado de verdad: pulsarlo con el modem
   // encendido lo APAGA.
@@ -1022,6 +1020,7 @@ void setup() {
   //    Ver la nota de tryConnectMQTT(): este primer intento falla de forma
   //    reproducible con state=-4 y conecta en el reintento del loop.
   tryConnectMQTT();
+  wakePublishForensics(bootPinV);
 
   // 3) GPS on
   //

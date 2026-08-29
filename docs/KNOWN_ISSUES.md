@@ -34,3 +34,4 @@
 | **Dormir vs apagar** | No hay un solo dato que cierre esto. Tu escepticismo sigue en pie. |
 | **CGNSSSLEEP** | n=1 y salió peor (45 s contra 22 s). No se puede concluir nada. |
 | **"Terror Gris"** | Sigo sin saber por qué Traccar llama así al dispositivo si el broker publica en `tracker/Lilygo/`. Tercera vez que pregunto. |
+

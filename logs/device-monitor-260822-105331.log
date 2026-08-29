@@ -1,0 +1,21 @@
+[   12.7s] [LAB ] estado inicial del modem: MUDO (arranque limpio, como debe ser)
+[   12.7s] [MDM ] pulso PWRKEY (polaridad main.cpp: LOW-HIGH 1000 ms-LOW)
+[   13.8s] [MDM ] responde AT tras 16 ms
+[   14.8s] [AT  ] > ATE0
+[   14.8s] [AT  ] < ATE0  | OK |   (5 ms)
+[   14.8s] [AT  ] > AT+SIMCOMATI
+[   14.8s] [AT  ] < | Manufacturer: SIMCOM INCORPORATED | Model: SIM7670G-MNGV | Revision: 2374B05SIM767XM5A_M | SIM767XM5_B05V01_241206 | IMEI: 864643061465631 | OK |   (18 ms)
+[   14.8s] [AT  ] > AT+CSCLK?
+[   14.8s] [AT  ] < | +CSCLK: 0 | OK |   (6 ms)
+[   14.8s] [AT  ] > AT+CGNSSPWR?
+[   14.8s] [AT  ] < | +CGNSSPWR: 0 | OK |   (6 ms)
+[   14.8s] [AT  ] > AT+CGPSHOT=?
+[   14.8s] [AT  ] < | ERROR |   (6 ms)
+[   14.8s] [AT  ] > AT+CGPSWARM=?
+[   14.8s] [AT  ] < | ERROR |   (5 ms)
+[   14.8s] [AT  ] > AT+CGPSCOLD=?
+[   14.8s] [AT  ] < | ERROR |   (5 ms)
+[   14.8s] [LAB ] soporte de comandos de arranque: CGPSHOT=no CGPSWARM=no CGPSCOLD=no
+[   14.8s] [LAB ] dejo el GNSS apagado 20 s para partir de un estado conocido
+[   14.8s] [AT  ] > AT+CGNSSPWR=0
+[   14.8s] [AT  ] < | OK |   (5 ms)
