@@ -93,12 +93,16 @@ static void serviceEvents() {
   const bool isOn = (pendingEvent == EV_ENGINE_ON);
   const char *eventName = isOn ? EVENT_ENGINE_ON : EVENT_ENGINE_OFF;
   const uint8_t eventIgnition = isOn ? 1 : 0;
-
-  bool stateDelivered = mqtt.publish(TOPIC_IGNITION, isOn ? "on" : "off", true);
   if (isOn) lastMovementMs = now;
 
   GpsPoint fresh = {};
   if (readGpsPoint(fresh)) rememberPoint(fresh);
+
+  if (!lastValidPoint.valid) {
+    SerialMon.printf("[PUB] evento %s pendiente: sin posición válida; MQTT permanece conectado\n",
+                     eventName);
+    return;
+  }
 
   if (isOn && fixAgeS() > FIX_MAX_AGE_S) {
     SerialMon.printf("[PUB] engine_on diferido: caché=%lus, esperando fix fresco\n",
@@ -106,15 +110,15 @@ static void serviceEvents() {
     return;
   }
 
+  bool stateDelivered = mqtt.publish(TOPIC_IGNITION, isOn ? "on" : "off", true);
   bool pointDelivered = publishPointWithIgnition(lastValidPoint, eventName, eventIgnition);
   if (stateDelivered && pointDelivered) {
     pendingEvent = EV_NONE;
     lastPublishMs = millis();
     SerialMon.printf("[PUB] evento %s confirmado y limpiado\n", eventName);
   } else {
-    SerialMon.printf("[PUB] evento %s pendiente: state=%d point=%d\n",
+    SerialMon.printf("[PUB] evento %s pendiente: state=%d point=%d; sin cerrar socket aquí\n",
                      eventName, (int)stateDelivered, (int)pointDelivered);
-    if (!pointDelivered) netClient.stop();
   }
 }
 
