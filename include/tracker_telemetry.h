@@ -8,6 +8,7 @@ static inline uint32_t fixAgeS() { return rtcFixAgeS + ((millis() - fixAgeBaseMs
 
 #define FIX_MAX_AGE_S 300UL
 #define EVENT_RETRY_MS 5000UL
+#define EVENT_RETRY_OFF_NO_POINT_MS 30000UL
 
 static bool readGpsPoint(GpsPoint &out) {
   float lat = 0, lon = 0, speed = 0, alt = 0, acc = 0;
@@ -87,7 +88,10 @@ static void serviceEvents() {
 
   static uint32_t lastEventAttemptMs = 0;
   uint32_t now = millis();
-  if (lastEventAttemptMs != 0 && (now - lastEventAttemptMs) < EVENT_RETRY_MS) return;
+  uint32_t retryMs = (pendingEvent == EV_ENGINE_OFF && !lastValidPoint.valid)
+                         ? EVENT_RETRY_OFF_NO_POINT_MS
+                         : EVENT_RETRY_MS;
+  if (lastEventAttemptMs != 0 && (now - lastEventAttemptMs) < retryMs) return;
   lastEventAttemptMs = now;
 
   const bool isOn = (pendingEvent == EV_ENGINE_ON);
@@ -123,8 +127,10 @@ static void serviceEvents() {
 }
 
 static void serviceTelemetry() {
+  static uint32_t lastTelemetryAttemptMs = 0;
   uint32_t now = millis();
-  if ((now - lastPublishMs) < currentPeriodMs()) return;
+  if ((now - lastTelemetryAttemptMs) < currentPeriodMs()) return;
+  lastTelemetryAttemptMs = now;
 
   GpsPoint fresh = {};
   bool haveFresh = readGpsPoint(fresh);
