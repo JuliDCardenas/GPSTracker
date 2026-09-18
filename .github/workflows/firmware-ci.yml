@@ -16,6 +16,16 @@ jobs:
       - run: pip install platformio
       - run: cp include/secrets.example.h include/secrets.h
       - run: pio run -e tracker
+      - name: Verify version fingerprint
+        run: strings .pio/build/tracker/firmware.elf | grep -F "2.3.0-rc1"
+      - name: Upload flashable binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracker-2.3.0-rc1-${{ github.sha }}
+          path: |
+            .pio/build/tracker/firmware.bin
+            .pio/build/tracker/bootloader.bin
+            .pio/build/tracker/partitions.bin
 
   subscriber:
     runs-on: ubuntu-latest
