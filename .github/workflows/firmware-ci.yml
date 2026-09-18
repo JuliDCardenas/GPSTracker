@@ -1,0 +1,29 @@
+name: Firmware and subscriber checks
+
+on:
+  push:
+    branches: [fix/ignition-event-contract-v2.3]
+  pull_request:
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install platformio
+      - run: cp include/secrets.example.h include/secrets.h
+      - run: pio run -e tracker
+
+  subscriber:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile server/event_store.py server/subscriberJsonOsmAnd.py
+      - working-directory: server
+        run: PYTHONPATH=. python -m unittest discover -s tests -v
