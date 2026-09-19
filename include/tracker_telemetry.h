@@ -11,6 +11,7 @@ static inline uint32_t fixAgeS() { return rtcFixAgeS + ((millis() - fixAgeBaseMs
 #define FIX_MAX_AGE_S 300UL
 #define EVENT_FRESH_POSITION_MAX_AGE_S 10UL
 #define EVENT_RETRY_MS 5000UL
+#define EVENT_SUBSCRIBE_RETRY_MS 2000UL
 #define EVENT_QUEUE_CAPACITY 8
 #define EVENT_MQTT_BUFFER_SIZE 768
 
@@ -46,6 +47,7 @@ static RTC_DATA_ATTR uint32_t eventBootNonce = 0;
 static RTC_DATA_ATTR uint32_t eventSequence = 0;
 static RTC_DATA_ATTR PendingEvent lastCapturedPendingEvent = EV_NONE;
 static uint32_t lastEventAttemptMs = 0;
+static uint32_t lastEventSubscribeAttemptMs = 0;
 static bool eventMqttWasConnected = false;
 
 static inline uint8_t eventQueueIndex(uint8_t offset) {
@@ -149,14 +151,47 @@ static void onIgnitionAck(char *topic, byte *payload, unsigned int length) {
   SerialMon.printf("[EVENT] ACK desconocido id=%s\n", eventId);
 }
 
-static void ensureEventSubscription() {
-  if (!mqtt.connected()) { eventMqttWasConnected = false; return; }
-  if (eventMqttWasConnected) return;
-  mqtt.setBufferSize(EVENT_MQTT_BUFFER_SIZE);
+// PubSubClient permite redimensionar el buffer fuera del procesamiento de un
+// paquete. Esta inicialización global ocurre después de construir `mqtt` y
+// antes de setup()/connect(), de modo que el primer CONNECT ya usa el buffer
+// requerido por el JSON v3. Si la reserva falla, ensureEventSubscription()
+// vuelve a intentarla de forma acotada y no publica eventos sin canal de ACK.
+static bool configureEventMqttClient() {
+  bool bufferOk = mqtt.setBufferSize(EVENT_MQTT_BUFFER_SIZE);
   mqtt.setCallback(onIgnitionAck);
+  return bufferOk;
+}
+static bool eventMqttClientConfigured = configureEventMqttClient();
+
+static bool ensureEventSubscription() {
+  if (!mqtt.connected()) {
+    eventMqttWasConnected = false;
+    lastEventSubscribeAttemptMs = 0;
+    return false;
+  }
+  if (eventMqttWasConnected) return true;
+
+  uint32_t now = millis();
+  if (lastEventSubscribeAttemptMs &&
+      (now - lastEventSubscribeAttemptMs) < EVENT_SUBSCRIBE_RETRY_MS) {
+    return false;
+  }
+  lastEventSubscribeAttemptMs = now;
+
+  if (!eventMqttClientConfigured) {
+    eventMqttClientConfigured = configureEventMqttClient();
+    if (!eventMqttClientConfigured) {
+      SerialMon.printf("[EVENT] buffer MQTT %u FAIL; reintento en %lums\n",
+                       (unsigned)EVENT_MQTT_BUFFER_SIZE,
+                       (unsigned long)EVENT_SUBSCRIBE_RETRY_MS);
+      return false;
+    }
+  }
+
   bool ok = mqtt.subscribe(TOPIC_IGNITION_ACK_V3, 1);
   SerialMon.printf("[EVENT] subscribe ack qos=1 result=%d\n", (int)ok);
-  eventMqttWasConnected = true;
+  eventMqttWasConnected = ok;
+  return ok;
 }
 
 static bool readGpsPoint(GpsPoint &out) {
@@ -255,8 +290,8 @@ static bool publishEventRecord(PendingEventRecord &record) {
 
 static void serviceEvents() {
   capturePendingTransition();
-  ensureEventSubscription();
-  if (eventStoreEmpty() || !mqtt.connected()) return;
+  bool subscriptionReady = ensureEventSubscription();
+  if (eventStoreEmpty() || !mqtt.connected() || !subscriptionReady) return;
   uint32_t now = millis();
   if (lastEventAttemptMs && (now - lastEventAttemptMs) < EVENT_RETRY_MS) return;
   lastEventAttemptMs = now;
