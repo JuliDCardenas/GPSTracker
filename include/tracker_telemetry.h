@@ -1,101 +1,221 @@
 #pragma once
-//
-// tracker_telemetry.h — lectura del GNSS y publicacion
-// Proyecto GPS Tracker Logan · rama feat/low-power-nivel2
-//
-// ESTE ARCHIVO NO ES INDEPENDIENTE. Salio de main.cpp y se incluye UNA sola vez,
-// desde main.cpp, justo despues de serviceMQTT(). En ese punto ya existen y por
-// eso aqui se usan sin declararlos: modem, mqtt, SerialMon, GpsPoint,
-// lastValidPoint, lastMovementMs, lastPublishMs, lastBatteryMs,
-// batteryEverPublished, isGpsPositionValid(), isGpsTimeValid(),
-// buildGpsQuality(), ignitionField(), isIgnitionOff(), currentPeriodMs(),
-// readBatteryVolts(), los TOPIC_* y las funciones de gnss_prod.h.
-//
-// Y al contrario, este archivo EXPORTA fixAgeS() y rtcFixAgeS, que usan
-// tracker_pm.h y tracker_wake.h. Los dos se incluyen despues: no cambiar ese
-// orden en main.cpp.
-//
+// GNSS, telemetría y eventos de ignición v3 idempotentes.
 
-// ---------- Edad de la posicion en cache ----------
-// Segundos transcurridos desde el ultimo fix FRESCO. Se lleva a mano porque
-// millis() se reinicia en cada despertar y este firmware no tiene reloj propio
-// en el que confiar: el reloj del modem viene 15 s adelantado respecto al
-// servidor (medido 2026-08-24) y encima se pierde cuando el modem se apaga.
-//
-// El reparto de responsabilidades es:
-//   rememberPoint()  -> la pone en cero, es el unico sitio donde nace un fix
-//   fixAgeS()        -> suma lo que llevamos despiertos en este arranque
-//   pmEnterParked()  -> congela el total antes de dormir
-//   pmParkedTick()   -> le suma PARKED_POLL_S por cada repaso dormido
+#include <esp_system.h>
+#include <string.h>
+
 static RTC_DATA_ATTR uint32_t rtcFixAgeS = 0;
 static uint32_t fixAgeBaseMs = 0;
+static inline uint32_t fixAgeS() { return rtcFixAgeS + ((millis() - fixAgeBaseMs) / 1000); }
 
-static inline uint32_t fixAgeS() {
-  return rtcFixAgeS + ((millis() - fixAgeBaseMs) / 1000);
+#define FIX_MAX_AGE_S 300UL
+#define EVENT_FRESH_POSITION_MAX_AGE_S 10UL
+#define EVENT_RETRY_MS 5000UL
+#define EVENT_SUBSCRIBE_RETRY_MS 2000UL
+#define EVENT_QUEUE_CAPACITY 8
+#define EVENT_MQTT_BUFFER_SIZE 768
+
+static const char TOPIC_IGNITION_STATE_V3[] = "tracker/Lilygo/state/ignition";
+static const char TOPIC_IGNITION_EVENT_V3[] = "tracker/Lilygo/event/ignition/v3";
+static const char TOPIC_IGNITION_ACK_V3[] = "tracker/Lilygo/ack/ignition/v3";
+
+enum EventPositionSource : uint8_t {
+  EVENT_POSITION_NONE = 0,
+  EVENT_POSITION_FRESH = 1,
+  EVENT_POSITION_CACHE = 2,
+};
+
+struct PendingEventRecord {
+  bool used;
+  bool acknowledged;
+  PendingEvent type;
+  uint8_t ignition;
+  uint32_t sequence;
+  uint32_t bootNonce;
+  uint32_t occurredMs;
+  uint32_t fixAgeAtEventS;
+  EventPositionSource positionSource;
+  GpsPoint position;
+  uint16_t attempts;
+  char eventId[48];
+};
+
+static RTC_DATA_ATTR PendingEventRecord eventQueue[EVENT_QUEUE_CAPACITY] = {};
+static RTC_DATA_ATTR uint8_t eventQueueHead = 0;
+static RTC_DATA_ATTR uint8_t eventQueueCount = 0;
+static RTC_DATA_ATTR uint32_t eventBootNonce = 0;
+static RTC_DATA_ATTR uint32_t eventSequence = 0;
+static RTC_DATA_ATTR PendingEvent lastCapturedPendingEvent = EV_NONE;
+static uint32_t lastEventAttemptMs = 0;
+static uint32_t lastEventSubscribeAttemptMs = 0;
+static bool eventMqttWasConnected = false;
+
+static inline uint8_t eventQueueIndex(uint8_t offset) {
+  return (uint8_t)((eventQueueHead + offset) % EVENT_QUEUE_CAPACITY);
+}
+static inline bool eventStoreEmpty() { return eventQueueCount == 0; }
+static inline uint8_t eventStoreCount() { return eventQueueCount; }
+static const char *eventTypeName(PendingEvent type) {
+  return type == EV_ENGINE_ON ? EVENT_ENGINE_ON : EVENT_ENGINE_OFF;
+}
+static const char *eventPositionSourceName(EventPositionSource source) {
+  if (source == EVENT_POSITION_FRESH) return "fresh";
+  if (source == EVENT_POSITION_CACHE) return "cache";
+  return "none";
 }
 
-// F26 (2026-08-24) — GUARDA DE ANTIGUEDAD PARA EL engine_on.
-//
-// Mas vieja que esto, la cache NO se republica al encender. El engine_off si la
-// quiere siempre, por vieja que sea, porque ese punto es el "aqui quedo
-// parqueado" y es el unico dato que Traccar va a tener del sitio.
-//
-// El numero es generoso a proposito: el TTFF de campo medido esta entre 3 y 4
-// minutos, asi que 5 minutos deja pasar el caso legitimo de una parada muy
-// corta donde la posicion vieja sigue siendo la buena, y corta los casos de
-// horas que son los que ensucian el mapa.
-#define FIX_MAX_AGE_S 300UL
+static bool enqueueIgnitionEvent(PendingEvent type) {
+  if (type == EV_NONE) return false;
+  if (eventQueueCount >= EVENT_QUEUE_CAPACITY) {
+    SerialMon.printf("[EVENT] cola llena (%u); %s sigue pendiente\n",
+                     (unsigned)EVENT_QUEUE_CAPACITY, eventTypeName(type));
+    publishStatus("event_queue_full");
+    return false;
+  }
+  if (eventBootNonce == 0) {
+    eventBootNonce = esp_random();
+    if (eventBootNonce == 0) eventBootNonce = 1;
+  }
+  if (++eventSequence == 0) eventSequence++;
 
-// ---------- Telemetria ----------
-// Lee el GNSS y, si el punto es valido, lo deja en out. Es bloqueante (AT+CGNSSINFO
-// tarda tipicamente 50-300 ms), por eso solo se llama en los instantes de
-// publicacion y no en cada vuelta del loop.
+  PendingEventRecord &record = eventQueue[eventQueueIndex(eventQueueCount)];
+  memset(&record, 0, sizeof(record));
+  record.used = true;
+  record.type = type;
+  record.ignition = type == EV_ENGINE_ON ? 1 : 0;
+  record.sequence = eventSequence;
+  record.bootNonce = eventBootNonce;
+  record.occurredMs = millis();
+  if (lastValidPoint.valid) {
+    record.position = lastValidPoint;
+    record.fixAgeAtEventS = fixAgeS();
+    record.positionSource = record.fixAgeAtEventS <= EVENT_FRESH_POSITION_MAX_AGE_S
+                                ? EVENT_POSITION_FRESH : EVENT_POSITION_CACHE;
+  } else {
+    record.positionSource = EVENT_POSITION_NONE;
+    record.fixAgeAtEventS = UINT32_MAX;
+  }
+  snprintf(record.eventId, sizeof(record.eventId), "%08lx-%08lx-%08lx",
+           (unsigned long)(uint32_t)ESP.getEfuseMac(),
+           (unsigned long)record.bootNonce, (unsigned long)record.sequence);
+  eventQueueCount++;
+  if (record.fixAgeAtEventS == UINT32_MAX) {
+    SerialMon.printf("[EVENT] capturado id=%s type=%s pos=none cola=%u\n",
+                     record.eventId, eventTypeName(type), (unsigned)eventQueueCount);
+  } else {
+    SerialMon.printf("[EVENT] capturado id=%s type=%s pos=%s age=%lus cola=%u\n",
+                     record.eventId, eventTypeName(type),
+                     eventPositionSourceName(record.positionSource),
+                     (unsigned long)record.fixAgeAtEventS, (unsigned)eventQueueCount);
+  }
+  return true;
+}
+
+static void capturePendingTransition() {
+  if (pendingEvent != EV_NONE && pendingEvent != lastCapturedPendingEvent &&
+      enqueueIgnitionEvent(pendingEvent)) {
+    lastCapturedPendingEvent = pendingEvent;
+  }
+}
+
+static void popAcknowledgedEvents() {
+  while (eventQueueCount > 0 && eventQueue[eventQueueHead].acknowledged) {
+    SerialMon.printf("[EVENT] ACK id=%s type=%s\n",
+                     eventQueue[eventQueueHead].eventId,
+                     eventTypeName(eventQueue[eventQueueHead].type));
+    memset(&eventQueue[eventQueueHead], 0, sizeof(PendingEventRecord));
+    eventQueueHead = (uint8_t)((eventQueueHead + 1) % EVENT_QUEUE_CAPACITY);
+    eventQueueCount--;
+  }
+  if (eventQueueCount == 0) {
+    pendingEvent = EV_NONE;
+    lastCapturedPendingEvent = EV_NONE;
+  }
+  lastEventAttemptMs = 0;
+}
+
+static void onIgnitionAck(char *topic, byte *payload, unsigned int length) {
+  if (strcmp(topic, TOPIC_IGNITION_ACK_V3) != 0) return;
+  char eventId[64];
+  size_t n = length < sizeof(eventId) - 1 ? length : sizeof(eventId) - 1;
+  memcpy(eventId, payload, n);
+  eventId[n] = '\0';
+  for (uint8_t offset = 0; offset < eventQueueCount; offset++) {
+    PendingEventRecord &record = eventQueue[eventQueueIndex(offset)];
+    if (record.used && strcmp(record.eventId, eventId) == 0) {
+      record.acknowledged = true;
+      popAcknowledgedEvents();
+      return;
+    }
+  }
+  SerialMon.printf("[EVENT] ACK desconocido id=%s\n", eventId);
+}
+
+// PubSubClient permite redimensionar el buffer fuera del procesamiento de un
+// paquete. Esta inicialización global ocurre después de construir `mqtt` y
+// antes de setup()/connect(), de modo que el primer CONNECT ya usa el buffer
+// requerido por el JSON v3. Si la reserva falla, ensureEventSubscription()
+// vuelve a intentarla de forma acotada y no publica eventos sin canal de ACK.
+static bool configureEventMqttClient() {
+  bool bufferOk = mqtt.setBufferSize(EVENT_MQTT_BUFFER_SIZE);
+  mqtt.setCallback(onIgnitionAck);
+  return bufferOk;
+}
+static bool eventMqttClientConfigured = configureEventMqttClient();
+
+static bool ensureEventSubscription() {
+  if (!mqtt.connected()) {
+    eventMqttWasConnected = false;
+    lastEventSubscribeAttemptMs = 0;
+    return false;
+  }
+  if (eventMqttWasConnected) return true;
+
+  uint32_t now = millis();
+  if (lastEventSubscribeAttemptMs &&
+      (now - lastEventSubscribeAttemptMs) < EVENT_SUBSCRIBE_RETRY_MS) {
+    return false;
+  }
+  lastEventSubscribeAttemptMs = now;
+
+  if (!eventMqttClientConfigured) {
+    eventMqttClientConfigured = configureEventMqttClient();
+    if (!eventMqttClientConfigured) {
+      SerialMon.printf("[EVENT] buffer MQTT %u FAIL; reintento en %lums\n",
+                       (unsigned)EVENT_MQTT_BUFFER_SIZE,
+                       (unsigned long)EVENT_SUBSCRIBE_RETRY_MS);
+      return false;
+    }
+  }
+
+  bool ok = mqtt.subscribe(TOPIC_IGNITION_ACK_V3, 1);
+  SerialMon.printf("[EVENT] subscribe ack qos=1 result=%d\n", (int)ok);
+  eventMqttWasConnected = ok;
+  return ok;
+}
+
 static bool readGpsPoint(GpsPoint &out) {
   float lat = 0, lon = 0, speed = 0, alt = 0, acc = 0;
   int vsat = 0, usat = 0;
   int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0;
   uint8_t fix = 0;
-
   bool ok = modem.getGPS(&fix, &lat, &lon, &speed, &alt, &vsat, &usat, &acc,
                          &year, &month, &day, &hour, &min, &sec);
-
-  if (!ok) {
-    SerialMon.println("[GPS] read FAIL");
-    return false;
-  }
-
+  if (!ok) { SerialMon.println("[GPS] read FAIL"); return false; }
   if (!isGpsPositionValid(fix, lat, lon, vsat, acc)) {
     SerialMon.printf("[GPS] posición inválida fix=%u lat=%.6f lon=%.6f speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
                      fix, lat, lon, speed, alt, vsat, acc);
     return false;
   }
-
-  // Canario de parseo corrupto: si la fecha no existe en este planeta, el resto
-  // de la trama tampoco es confiable aunque la lat/lon se vea razonable.
   if (!isGpsTimeValid(year, month, day, hour, min, sec)) {
     SerialMon.printf("[GPS] trama corrupta, fecha %04d-%02d-%02dT%02d:%02d:%02d -> descartada\n",
                      year, month, day, hour, min, sec);
     return false;
   }
-
-  // F22 (2026-08-22) — GUARDIA DE TRAMA RANCIA. Ver la SEPTIMA REGLA.
-  //
-  // Hasta aqui la trama paso el filtro de calidad y el canario de fecha, y sin
-  // embargo puede ser la ULTIMA SOLUCION GUARDADA que el modem recicla como si
-  // fuera nueva. En el banco de hoy la trama vieja traia MEJORES sats y HDOP que
-  // las reales, asi que ningun filtro de calidad la iba a atrapar: lo unico que
-  // la delata es que la marca de tiempo no avanzo.
-  //
-  // Va DESPUES del canario de fecha a proposito: si la fecha viene corrupta, la
-  // marca no sirve ni para comparar.
   char tsNow[24];
   snprintf(tsNow, sizeof(tsNow), "%04d-%02d-%02dT%02d:%02d:%02dZ",
            year, month, day, hour, min, sec);
-
   if (gnssFrameIsStale(tsNow, lastValidPoint.valid, lastValidPoint.ts)) {
-    // El contador vive en RTC; la publicacion es oportunista y va limitada por
-    // GNSS_STALE_LOG_MS dentro de gnssFrameIsStale(), que ya decidio si toca
-    // reportar. Aqui solo se acompana con el topic de sistema.
     if (mqtt.connected()) {
       char g[64];
       snprintf(g, sizeof(g), "stale=%u,last=%s", (unsigned)rtcGnssStale, tsNow);
@@ -103,173 +223,105 @@ static bool readGpsPoint(GpsPoint &out) {
     }
     return false;
   }
-
-  // Primer fix FRESCO tras encender el motor GNSS: unico TTFF de produccion que
-  // vamos a tener. Todos los demas numeros de TTFF del proyecto son de banco.
   gnssNoteFirstFix(vsat, acc);
-
-  // F20: solo instrumentacion, el CSV no se toca. Ver gnssLogSpeedUnits().
   gnssLogSpeedUnits(speed);
-
   uint8_t quality = buildGpsQuality(speed, alt);
-
-  out.valid = true;
-  out.fix = fix;
-  out.lat = lat;
-  out.lon = lon;
-  out.speed = speed;
-  out.alt = alt;
-  out.acc = acc;
-  out.vsat = vsat;
+  out.valid = true; out.fix = fix; out.lat = lat; out.lon = lon;
+  out.speed = speed; out.alt = alt; out.acc = acc; out.vsat = vsat;
   out.speedValid = (quality & GPS_QUALITY_SPEED_VALID) != 0;
   out.altValid = (quality & GPS_QUALITY_ALT_VALID) != 0;
-  snprintf(out.ts, sizeof(out.ts), "%04d-%02d-%02dT%02d:%02d:%02dZ",
-           year, month, day, hour, min, sec);
-
-  if (!out.speedValid || !out.altValid) {
-    SerialMon.printf("[GPS] posición válida con datos parciales quality=%u speed=%.2f alt=%.1f sats=%d hdop=%.2f\n",
-                     quality, speed, alt, vsat, acc);
-  }
-
+  snprintf(out.ts, sizeof(out.ts), "%s", tsNow);
   return true;
 }
 
-// Actualiza la cache y la marca de movimiento con un punto fresco.
-static void rememberPoint(const GpsPoint &p) {
-  // F26: este es el unico sitio del firmware donde nace un fix fresco, asi que
-  // es el unico sitio donde el reloj de antiguedad se pone en cero.
-  rtcFixAgeS   = 0;
+static void rememberPoint(const GpsPoint &point) {
+  rtcFixAgeS = 0;
   fixAgeBaseMs = millis();
-
-  lastValidPoint = p;
-  if (p.speedValid && p.speed > MOVING_SPEED_KMH) {
-    lastMovementMs = millis();
-  }
+  lastValidPoint = point;
+  if (point.speedValid && point.speed > MOVING_SPEED_KMH) lastMovementMs = millis();
 }
 
-static bool publishPoint(const GpsPoint &p, const char *event) {
-  if (!mqtt.connected()) {
-    SerialMon.println("[PUB] omitido: MQTT desconectado");
-    return false;
-  }
-  if (!p.valid) {
-    SerialMon.println("[PUB] omitido: aún no hay posición válida en caché");
-    return false;
-  }
-
-  char speedField[16] = "";
-  char altField[16] = "";
-
-  if (p.speedValid) {
-    snprintf(speedField, sizeof(speedField), "%.2f", p.speed);
-  }
-  if (p.altValid) {
-    snprintf(altField, sizeof(altField), "%.1f", p.alt);
-  }
-
+static bool publishPointWithIgnition(const GpsPoint &point, const char *event, uint8_t ignition) {
+  if (!mqtt.connected()) { SerialMon.println("[PUB] omitido: MQTT desconectado"); return false; }
+  if (!point.valid) { SerialMon.println("[PUB] omitido: aún no hay posición válida en caché"); return false; }
+  char speedField[16] = "", altField[16] = "";
+  if (point.speedValid) snprintf(speedField, sizeof(speedField), "%.2f", point.speed);
+  if (point.altValid) snprintf(altField, sizeof(altField), "%.1f", point.alt);
   char payload[256];
   snprintf(payload, sizeof(payload),
            "v2,%s,%u,%.6f,%.6f,%s,%s,%d,%.2f,%u,%s,%s",
-           DEVICE_ID, p.fix, p.lat, p.lon, speedField, altField, p.vsat, p.acc,
-           ignitionField(), event, p.ts);
-
-  // Telemetría GPS en QoS 0: alto volumen, perder un punto no es crítico.
-  bool pubOk = mqtt.publish(TOPIC_TELEMETRY, payload);
-  SerialMon.printf("[PUB] %s topic=%s payload=%s\n", pubOk ? "OK" : "FAIL", TOPIC_TELEMETRY, payload);
-  return pubOk;
+           DEVICE_ID, point.fix, point.lat, point.lon, speedField, altField,
+           point.vsat, point.acc, ignition, event, point.ts);
+  bool ok = mqtt.publish(TOPIC_TELEMETRY, payload);
+  SerialMon.printf("[PUB] %s topic=%s payload=%s\n", ok ? "OK" : "FAIL", TOPIC_TELEMETRY, payload);
+  return ok;
+}
+static bool publishPoint(const GpsPoint &point, const char *event) {
+  return publishPointWithIgnition(point, event, ignitionField());
 }
 
-// Publica los eventos de transicion apenas haya enlace. Si MQTT esta caido, el
-// evento queda pendiente y sale en cuanto vuelva: no se pierde el apagado.
-static void serviceEvents() {
-  if (pendingEvent == EV_NONE) {
-    return;
-  }
-  if (!mqtt.connected()) {
-    return;
-  }
-
-  bool isOn = (pendingEvent == EV_ENGINE_ON);
-  const char *eventName = isOn ? EVENT_ENGINE_ON : EVENT_ENGINE_OFF;
-
-  // Estado retenido para n8n y depuracion.
-  mqtt.publish(TOPIC_IGNITION, isOn ? "on" : "off", true);
-
-  if (isOn) {
-    // Arranca el reloj del ralenti: tras encender, el vehiculo tiene garantizada
-    // la cadencia rapida durante MOVING_HOLD_MS aunque todavia no se mueva.
-    lastMovementMs = millis();
-  }
-
-  // Al encender vale la pena intentar un punto fresco. Al apagar tambien se
-  // intenta, pero si el GNSS no responde se publica la ultima posicion valida:
-  // ese es justamente el "aqui quedo parqueado".
-  GpsPoint fresh = {};
-  if (readGpsPoint(fresh)) {
-    rememberPoint(fresh);
-  }
-
-  // F26 — GUARDA DE ANTIGUEDAD. Si el intento de arriba trajo un fix fresco,
-  // rememberPoint() ya puso el reloj en cero y esta guarda no estorba.
-  //
-  // Solo aplica al encender. El engine_off publica siempre, por viejo que sea el
-  // punto, porque es el unico registro del sitio donde quedo el carro.
-  if (isOn && fixAgeS() > FIX_MAX_AGE_S) {
-    SerialMon.printf("[PUB] engine_on sin punto: la cache tiene %lus (max %lus) -> se espera fix fresco\n",
-                     (unsigned long)fixAgeS(), (unsigned long)FIX_MAX_AGE_S);
+static bool publishEventRecord(PendingEventRecord &record) {
+  const char *type = eventTypeName(record.type);
+  const char *state = record.ignition ? "on" : "off";
+  const char *source = eventPositionSourceName(record.positionSource);
+  char payload[640];
+  if (record.positionSource == EVENT_POSITION_NONE) {
+    snprintf(payload, sizeof(payload),
+      "{\"v\":3,\"device\":\"%s\",\"event_id\":\"%s\",\"type\":\"%s\",\"ignition\":%u,\"occurred_ms\":%lu,\"position_source\":\"none\",\"fix_age_s\":null}",
+      DEVICE_ID, record.eventId, type, record.ignition, (unsigned long)record.occurredMs);
   } else {
-    publishPoint(lastValidPoint, eventName);
-    lastPublishMs = millis();
+    snprintf(payload, sizeof(payload),
+      "{\"v\":3,\"device\":\"%s\",\"event_id\":\"%s\",\"type\":\"%s\",\"ignition\":%u,\"occurred_ms\":%lu,\"position_source\":\"%s\",\"fix_age_s\":%lu,\"position\":{\"fix\":%u,\"lat\":%.6f,\"lon\":%.6f,\"speed\":%.2f,\"alt\":%.1f,\"sats\":%d,\"hdop\":%.2f,\"ts\":\"%s\"}}",
+      DEVICE_ID, record.eventId, type, record.ignition,
+      (unsigned long)record.occurredMs, source,
+      (unsigned long)record.fixAgeAtEventS, record.position.fix,
+      record.position.lat, record.position.lon, record.position.speed,
+      record.position.alt, record.position.vsat, record.position.acc, record.position.ts);
   }
+  bool stateOk = mqtt.publish(TOPIC_IGNITION_STATE_V3, state, true);
+  bool legacyOk = mqtt.publish(TOPIC_IGNITION, state, true);
+  bool eventOk = mqtt.publish(TOPIC_IGNITION_EVENT_V3, payload, false);
+  record.attempts++;
+  SerialMon.printf("[EVENT] intento=%u id=%s state=%d legacy=%d event=%d pos=%s\n",
+                   (unsigned)record.attempts, record.eventId,
+                   (int)stateOk, (int)legacyOk, (int)eventOk, source);
+  return stateOk && eventOk;
+}
 
-  pendingEvent = EV_NONE;
+static void serviceEvents() {
+  capturePendingTransition();
+  bool subscriptionReady = ensureEventSubscription();
+  if (eventStoreEmpty() || !mqtt.connected() || !subscriptionReady) return;
+  uint32_t now = millis();
+  if (lastEventAttemptMs && (now - lastEventAttemptMs) < EVENT_RETRY_MS) return;
+  lastEventAttemptMs = now;
+  publishEventRecord(eventQueue[eventQueueHead]);
 }
 
 static void serviceTelemetry() {
+  static uint32_t lastTelemetryAttemptMs = 0;
   uint32_t now = millis();
-  if ((now - lastPublishMs) < currentPeriodMs()) {
-    return;
-  }
-  lastPublishMs = now;
-
+  if ((now - lastTelemetryAttemptMs) < currentPeriodMs()) return;
+  lastTelemetryAttemptMs = now;
   GpsPoint fresh = {};
   bool haveFresh = readGpsPoint(fresh);
-  if (haveFresh) {
-    rememberPoint(fresh);
-  }
-
-  if (haveFresh) {
-    publishPoint(lastValidPoint, EVENT_NONE);
-    return;
-  }
-
-  // Sin fix fresco: con el motor encendido no se publica (igual que antes,
-  // se reintenta en el siguiente ciclo). Pero el keepalive de parqueo si sale
-  // con la ultima posicion conocida, porque su funcion es avisar "sigo aqui".
-  if (isIgnitionOff()) {
-    publishPoint(lastValidPoint, EVENT_NONE);
-  }
+  if (haveFresh) rememberPoint(fresh);
+  bool sent = false;
+  if (haveFresh) sent = publishPoint(lastValidPoint, EVENT_NONE);
+  else if (isIgnitionOff()) sent = publishPoint(lastValidPoint, EVENT_NONE);
+  if (sent) lastPublishMs = now;
 }
 
 static void serviceBattery() {
-  // Parqueado, la bateria viaja al ritmo del keepalive y no cada 5 min.
   uint32_t period = isIgnitionOff() ? (PARKED_KEEPALIVE_MIN * 60000UL) : BATTERY_PERIOD_MS;
-
   uint32_t now = millis();
-  // La primera lectura sale apenas hay enlace. Sin esto, con el motor encendido
-  // nos quedabamos sin dato de bateria los primeros 5 minutos (banco 2026-08-18).
-  if (batteryEverPublished && (now - lastBatteryMs) < period) {
-    return;
+  if (batteryEverPublished && (now - lastBatteryMs) < period) return;
+  if (!mqtt.connected()) return;
+  char buffer[16];
+  snprintf(buffer, sizeof(buffer), "%.2f", readBatteryVolts());
+  if (mqtt.publish(TOPIC_BATTERY, buffer, true)) {
+    lastBatteryMs = now;
+    batteryEverPublished = true;
   }
-  if (!mqtt.connected()) {
-    return;
-  }
-
-  float volts = readBatteryVolts();
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%.2f", volts);
-  mqtt.publish(TOPIC_BATTERY, buf, true);
-  lastBatteryMs = now;
-  batteryEverPublished = true;
-  SerialMon.printf("[BAT] %s V\n", buf);
+  SerialMon.printf("[BAT] %s V\n", buffer);
 }
