@@ -1,0 +1,39 @@
+name: Firmware and subscriber checks
+
+on:
+  push:
+    branches: [fix/ignition-event-contract-v2.3]
+  pull_request:
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install platformio
+      - run: cp include/secrets.example.h include/secrets.h
+      - run: pio run -e tracker
+      - name: Verify version fingerprint
+        run: strings .pio/build/tracker/firmware.elf | grep -F "2.3.0-rc1"
+      - name: Upload flashable binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracker-2.3.0-rc1-${{ github.sha }}
+          path: |
+            .pio/build/tracker/firmware.bin
+            .pio/build/tracker/bootloader.bin
+            .pio/build/tracker/partitions.bin
+
+  subscriber:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile server/event_store.py server/subscriberJsonOsmAnd.py server/subscriberV3.py
+      - working-directory: server
+        run: PYTHONPATH=. python -m unittest discover -s tests -v
