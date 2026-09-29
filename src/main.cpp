@@ -1026,6 +1026,7 @@ void setup() {
 
   // 1) LTE up
   ensureLTE();
+  espnowUpdateLteStatus();
 
   // 2) MQTT up (primer intento; el loop se encarga de reintentar).
   //    El status "boot" lo publica tryConnectMQTT() al conectar.

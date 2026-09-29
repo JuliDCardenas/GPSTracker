@@ -232,7 +232,10 @@ static void sendHealth() {
     pkt.gnssHdopX10 = 0;
   }
 
-  // Uso de caché para no enviar comandos AT en el hilo de 1 Hz (Defecto 4)
+  // Asignación explícita del estado operativo del tracker (Hallazgo 1)
+  pkt.trackerState = getTrackerState();
+
+  // Uso de caché para no enviar comandos AT en el hilo de 1 Hz (Defecto 4 / Hallazgo 3)
   pkt.lteSignal = cachedLteSignal;
   pkt.lteRegistered = cachedLteRegistered;
   pkt.mqttConnected = mqtt.connected() ? 1 : 0;
@@ -258,21 +261,26 @@ static void sendHealth() {
   espnowSendRaw(ESPNOW_PEER_MAC, (const uint8_t *)&pkt, sizeof(pkt));
 }
 
-// Servicio periódico llamado desde loop()
+// Actualización explícita de métricas LTE: solo se llama durante setup o reconexión de red,
+// NUNCA en el superloop rápido de 1 Hz (Hallazgo 3)
+static void espnowUpdateLteStatus() {
+  int csq = modem.getSignalQuality();
+  if (csq >= 0 && csq <= 31) {
+    cachedLteSignal = (uint8_t)csq;
+  }
+  cachedLteRegistered = modem.isGprsConnected() ? 1 : 0;
+}
+
+// Servicio periódico llamado desde loop() - 100% libre de comandos AT
 static void espnowService() {
   if (!espnowReady) return;
   if (isIgnitionOff()) return;
 
   uint32_t now = millis();
 
-  // Actualización no bloqueante y espaciada del caché LTE (Defecto 4)
-  if (lastLteCheckMs == 0 || (now - lastLteCheckMs >= LTE_CHECK_INTERVAL_MS)) {
-    lastLteCheckMs = now;
-    int csq = modem.getSignalQuality();
-    if (csq >= 0 && csq <= 31) {
-      cachedLteSignal = (uint8_t)csq;
-    }
-    cachedLteRegistered = modem.isGprsConnected() ? 1 : 0;
+  // Si MQTT está conectado, sabemos que GPRS está registrado sin enviar comandos AT
+  if (mqtt.connected()) {
+    cachedLteRegistered = 1;
   }
 
   uint8_t state = getTrackerState();
