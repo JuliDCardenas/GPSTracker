@@ -39,6 +39,11 @@
 // include/secrets.h y completa los valores reales.
 // include/secrets.h esta en .gitignore y no debe subirse al repositorio.
 #include "secrets.h"
+#include "espnow_protocol.h"
+
+// Forward declarations para ESP-NOW (implementados en tracker_espnow.h)
+static void espnowSuspend();
+static void espnowSendEvent(uint8_t eventType);
 
 // ---------- Pines ----------
 #define MODEM_BAUDRATE 115200
@@ -921,10 +926,6 @@ static void serviceMQTT() {
 // Todo el bloque pm*: deep sleep, sueno del modem por DTR, guardian de
 // arranque, corte por bajo voltaje y ciclo de parqueo. Va al final porque usa
 // publishPoint() y serviceEvents() del header anterior.
-
-static void espnowSuspend();
-static void espnowSendEvent(uint8_t eventType);
-
 #include "tracker_pm.h"
 #include "tracker_wake.h"
 #include "tracker_espnow.h"

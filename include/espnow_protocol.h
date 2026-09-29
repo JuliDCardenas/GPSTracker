@@ -83,7 +83,7 @@ struct __attribute__((packed)) EspNowHeader {
 };
 
 // ==========================================================================
-// Fast Telemetry — 2 Hz en MOVING, 1 Hz en IDLE (20 bytes)
+// Fast Telemetry — 2 Hz en MOVING, 1 Hz en IDLE (18 bytes)
 // ==========================================================================
 struct __attribute__((packed)) EspNowFastTelem {
   EspNowHeader hdr;     // 8 bytes
@@ -96,7 +96,7 @@ struct __attribute__((packed)) EspNowFastTelem {
 };
 
 // ==========================================================================
-// Health — 1 Hz (32 bytes)
+// Health — 1 Hz (30 bytes)
 // ==========================================================================
 struct __attribute__((packed)) EspNowHealth {
   EspNowHeader hdr;       // 8 bytes
@@ -120,7 +120,7 @@ struct __attribute__((packed)) EspNowHealth {
 };
 
 // ==========================================================================
-// Event — envío inmediato (24 bytes)
+// Event — envío inmediato (20 bytes)
 // ==========================================================================
 struct __attribute__((packed)) EspNowEvent {
   EspNowHeader hdr;       // 8 bytes
@@ -140,10 +140,27 @@ struct __attribute__((packed)) EspNowEvent {
 
 #ifdef __cplusplus
 static_assert(sizeof(EspNowHeader)    == 8,  "EspNowHeader debe ser 8 bytes");
-static_assert(sizeof(EspNowFastTelem) == 20, "EspNowFastTelem debe ser 20 bytes");
-static_assert(sizeof(EspNowHealth)    == 32, "EspNowHealth debe ser 32 bytes");
-static_assert(sizeof(EspNowEvent)     == 24, "EspNowEvent debe ser 24 bytes");
+static_assert(sizeof(EspNowFastTelem) == 18, "EspNowFastTelem debe ser 18 bytes");
+static_assert(sizeof(EspNowHealth)    == 30, "EspNowHealth debe ser 30 bytes");
+static_assert(sizeof(EspNowEvent)     == 20, "EspNowEvent debe ser 20 bytes");
 static_assert(sizeof(float)           == 4,  "float debe ser 4 bytes (IEEE 754)");
+
+// Validación explícita de la estructura heredada:
+// En la documentación antigua se reportaba erróneamente como 18 bytes,
+// pero su tamaño real packed siempre fue 23 bytes:
+struct __attribute__((packed)) VehicleTelemetryLegacyCheck {
+  uint8_t  magic;       // 1
+  uint16_t seq;         // 2
+  float    speed;       // 4
+  uint16_t rpm;         // 2
+  float    temp;        // 4
+  float    voltage;     // 4
+  uint8_t  satellites;  // 1
+  uint8_t  fixType;     // 1
+  int16_t  heading;     // 2
+  int16_t  altitude;    // 2
+};
+static_assert(sizeof(VehicleTelemetryLegacyCheck) == 23, "VehicleTelemetryLegacyCheck debe ser 23 bytes");
 #endif
 
 // ==========================================================================
