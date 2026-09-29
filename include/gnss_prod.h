@@ -9,6 +9,9 @@
 
 #define FW_NAME "tracker"
 #define FW_VERSION "2.3.0-rc1"
+#define FW_VERSION_MAJOR 2
+#define FW_VERSION_MINOR 3
+#define FW_VERSION_PATCH 0
 #ifndef TRACKER_GIT_SHA
 #define TRACKER_GIT_SHA "unknown"
 #endif
