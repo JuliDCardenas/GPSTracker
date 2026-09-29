@@ -78,6 +78,7 @@ static void pmDeepSleep(bool wakeOnIgnition, uint32_t timerSeconds) {
   SerialMon.printf("[PM] deep sleep ext0=%d timer=%lus\n",
                    (int)ext0Armed, (unsigned long)timerSeconds);
   SerialMon.flush();
+  espnowSuspend();
   esp_deep_sleep_start();  // no retorna
 }
 
@@ -267,6 +268,9 @@ static void pmEnterCutoff(float v) {
   delay(SETTLE_MS);
   mqtt.loop();
 
+  espnowSendEvent(ESPNOW_EVT_LOW_BATTERY);
+  delay(50);
+
   pmDisconnectClean();
   pmGnssOff();
   modem.sendAT("+CPOF");          // en corte se apaga TODO: manda la celda
@@ -296,6 +300,9 @@ static void pmEnterParked() {
 
   delay(SETTLE_MS);
   mqtt.loop();
+
+  espnowSendEvent(ESPNOW_EVT_PARKED_SLEEP);
+  delay(50);
 
   pmDisconnectClean();
   pmGnssOff();                    // apaga GNSS, NO el modem

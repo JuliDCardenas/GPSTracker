@@ -675,6 +675,7 @@ static void serviceIgnition() {
 
   ignState = observed;
   pendingEvent = (ignState == IGN_ON) ? EV_ENGINE_ON : EV_ENGINE_OFF;
+  espnowSendEvent(ignState == IGN_ON ? ESPNOW_EVT_ENGINE_ON : ESPNOW_EVT_ENGINE_OFF);
   SerialMon.printf("[IGN] %s pin=%.3fV vbus=%.2fV\n",
                    (ignState == IGN_ON) ? "ON" : "OFF", pinV, pinV * DIVIDER_FACTOR);
 #endif
@@ -920,8 +921,13 @@ static void serviceMQTT() {
 // Todo el bloque pm*: deep sleep, sueno del modem por DTR, guardian de
 // arranque, corte por bajo voltaje y ciclo de parqueo. Va al final porque usa
 // publishPoint() y serviceEvents() del header anterior.
+
+static void espnowSuspend();
+static void espnowSendEvent(uint8_t eventType);
+
 #include "tracker_pm.h"
 #include "tracker_wake.h"
+#include "tracker_espnow.h"
 
 static float bootPinV = 0.0f;
 
@@ -1014,6 +1020,9 @@ void setup() {
   // encendido lo APAGA.
   pmModemResume();
 
+  // Se inicializa ESP-NOW antes que LTE porque usa el radio WiFi que está libre
+  espnowInit();
+
   // 1) LTE up
   ensureLTE();
 
@@ -1068,6 +1077,7 @@ void loop() {
   serviceEvents();
   serviceTelemetry();
   serviceBattery();
+  espnowService();
 
   // Nivel 2: dormir cuando el carro esta apagado.
   //
