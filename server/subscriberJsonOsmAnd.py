@@ -254,6 +254,10 @@ def derive_speed_if_needed(d: dict):
 		logging.info("No se deriva velocidad: %.1f km/h fuera de rango", derived_speed_kmh)
 		return d
 
+	d["speed"] = derived_speed_kmh / 1.852
+		logging.info("No se deriva velocidad: %.1f km/h fuera de rango", derived_speed_kmh)
+		return d
+
 	d["speed"] = derived_speed_kmh
 	d["speed_source"] = "derived"
 	logging.info("Velocidad derivada %.1f km/h dist=%.1fm dt=%.1fs", derived_speed_kmh, distance_m, dt)
@@ -279,7 +283,7 @@ def send_osmand(lat, lon, speed=None, alt=None, ignition=None, event=None):
 		"lon": f"{lon:.5f}",
 	}
 	if speed is not None:
-		params["speed"] = f"{float(speed):.1f}"
+		params["speed"] = f"{float(speed) / 1.852:.1f}"
 	if alt is not None:
 		params["altitude"] = f"{float(alt):.0f}"
 	if ignition is not None:

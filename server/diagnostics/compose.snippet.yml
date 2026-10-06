@@ -1,0 +1,28 @@
+# Fragmento para fusionar en /home/ubuntu/mosquitto/docker-compose.yml
+services:
+  tracker-diagnostics:
+    build: ./GPSTracker/server/diagnostics
+    container_name: tracker-diagnostics
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USER: ${MQTT_USER:-julian}
+      MQTT_PASS: ${MQTT_PASS}
+      MQTT_TOPICS: tracker/Lilygo/sys/#,tracker/Lilygo/event/#,tracker/Lilygo/ack/#
+      DEVICE_ID: Lilygo
+      PGHOST: mqtt-postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGSCHEMA: tracker_diag
+    depends_on:
+      mqtt-postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    networks:
+      - mqtt_net

@@ -7,3 +7,7 @@
 # Local secrets
 include/secrets.h
 .env
+include/espnow_secrets.h
+
+# Device monitor logs
+logs/device-monitor-*.log
