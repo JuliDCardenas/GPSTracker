@@ -356,6 +356,8 @@ static uint8_t mqttFailCount = 0;
 static uint32_t mqttNextAttemptMs = 0;
 static uint32_t lteNextAttemptMs = 0;
 static uint32_t lteRetryDelayMs = 5000;
+static uint32_t lteNextAttemptMs = 0;
+static uint32_t lteRetryDelayMs = 5000;
 static uint32_t mqttRetryDelayMs = MQTT_RETRY_BASE_MS;
 // RTC_DATA_ATTR: que sobreviva al deep sleep, para que el forense "boot" vs
 // "mqtt_reconnected" siga significando algo despues de una noche de parqueo.
@@ -491,7 +493,7 @@ static uint8_t buildGpsQuality(float speedKnots, float altitudeM) {
   if (isGpsAltitudeValid(altitudeM)) {
     quality |= GPS_QUALITY_ALT_VALID;
   }
-  if (isGpsSpeedValid(speedKmh)) {
+  if (isGpsSpeedValid(speedKnots)) {
     quality |= GPS_QUALITY_SPEED_VALID;
   }
 
@@ -728,6 +730,10 @@ static bool waitForAT(uint32_t timeoutMs = 15000) {
       SerialMon.println("AT timeout");
       return false;
     }
+    if (millis() - t0 > timeoutMs) {
+      SerialMon.println("AT timeout");
+      return false;
+    }
     // Este bucle alimenta el WDT, asi que no se reinicia solo: si el modem no
     // responde, el firmware se queda aqui. Al menos que se vea en el log cuanto
     // lleva esperando, para distinguirlo de un cuelgue mudo.
@@ -738,6 +744,7 @@ static bool waitForAT(uint32_t timeoutMs = 15000) {
   }
   SerialMon.println("AT OK");
   return true;
+  return true;
 }
 
 static bool ensureLTE() {
@@ -746,7 +753,7 @@ static bool ensureLTE() {
   SerialMon.print("Waiting for network...");
   if (!modem.waitForNetwork(30000L)) {
     SerialMon.println(" FAIL");
-    return false;
+    return;
   }
   SerialMon.println(" OK");
 
@@ -766,6 +773,7 @@ static bool ensureLTE() {
   IPAddress ip = modem.localIP();
   SerialMon.print("IP: ");
   SerialMon.println(ip);
+  return true;
   return true;
 }
 
@@ -798,6 +806,8 @@ static bool restartModem() {
 // segundos en cada arranque y en cada pulso de parqueo, asi que vale la pena
 // resolverlo: en el Nivel 2 ese reintento se paga con bateria.
 static bool tryConnectMQTT() {
+  // Cierra socket antes de conectar (hipotesis state=-4)
+  netClient.stop();
   // Cierra socket antes de conectar (hipotesis state=-4)
   netClient.stop();
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
@@ -912,7 +922,7 @@ static void serviceMQTT() {
 
   if (mqttFailCount == MQTT_FAILS_BEFORE_LTE_RECONNECT) {
     SerialMon.println("[MQTT] escalando -> reconectar LTE");
-    if (!ensureLTE()) { lteRetryDelayMs = 5000; lteNextAttemptMs = millis() + lteRetryDelayMs; return; }
+    if (!ensureLTE()) { lteRetryDelayMs = 5000; lteNextAttemptMs = millis() + lteRetryDelayMs; mqttNextAttemptMs = millis() + mqttRetryDelayMs; return; }
   } else if (mqttFailCount == MQTT_FAILS_BEFORE_MODEM_RESTART) {
     SerialMon.println("[MQTT] escalando -> reiniciar modem");
     if (!restartModem()) { lteRetryDelayMs = 5000; lteNextAttemptMs = millis() + lteRetryDelayMs; return; }
@@ -1081,12 +1091,19 @@ void loop() {
 
   // Mantener sesion MQTT viva
   uint32_t now = millis();
+  uint32_t now = millis();
   if (!modem.isNetworkConnected() || !modem.isGprsConnected()) {
     if (now >= lteNextAttemptMs) {
       SerialMon.println("[NET] down -> reconnect");
       if (ensureLTE()) {
         lteRetryDelayMs = 5000;
       } else {
+        lteRetryDelayMs *= 2;
+        if (lteRetryDelayMs > 60000) lteRetryDelayMs = 60000;
+      }
+      lteNextAttemptMs = millis() + lteRetryDelayMs;
+    }
+  }
         lteRetryDelayMs *= 2;
         if (lteRetryDelayMs > 60000) lteRetryDelayMs = 60000;
       }

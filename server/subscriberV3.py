@@ -31,6 +31,10 @@ def event_position(payload):
         return position, payload.get("position_source", "cache")
     if legacy._last_valid_point is not None:
         return legacy._last_valid_point, "server_cache"
+    if position is not None and position.get("speed") is not None:
+        # derived inside payload JSON isn't guaranteed, convert to knots.
+        if payload.get("position_source") == "derived":
+            position["speed"] = float(position["speed"]) / 1.852
     return None, "none"
 
 

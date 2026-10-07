@@ -88,6 +88,11 @@ static void pmDisconnectClean() {
     mqtt.publish(TOPIC_LWT, LWT_OFFLINE, true);
     mqtt.disconnect();  // cierre limpio
   }
+  if (mqtt.connected()) {
+    // Publicar LWT explicitamente offline para no generar online/offline enganosos al despertar
+    mqtt.publish(TOPIC_LWT, LWT_OFFLINE, true);
+    mqtt.disconnect();  // cierre limpio
+  }
   netClient.stop();                         // y mata el socket zombi state=-4
 }
 
@@ -97,7 +102,6 @@ static bool pmModemSleep() {
   if (modem.waitResponse(1000) != 1) {
     SerialMon.println("[PM] AT+CSCLK=1 rechazado -> el modem queda despierto");
     rtcModemAlive = true;
-    return true;
     return false;                 // degrada, no rompe
   }
   pinMode(MODEM_DTR_PIN, OUTPUT);
@@ -131,6 +135,10 @@ static bool pmModemWake() {
     SerialMon.println("[PM] modem no responde a AT despues de despertar");
   }
   return ok;
+  if (!ok) {
+    SerialMon.println("[PM] modem no responde a AT despues de despertar");
+  }
+  return ok;
 }
 
 // DEFECTO CORREGIDO (2026-08-20): pmParkedTick() llamaba pmModemWake() aun
@@ -147,7 +155,6 @@ static bool pmModemResume() {
     modemPowerOn();
     waitForAT();
     rtcModemAlive = true;
-    return true;
   }
 }
 

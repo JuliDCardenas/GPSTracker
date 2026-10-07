@@ -12,18 +12,18 @@ class TestSubscriberLogic(unittest.TestCase):
 
         self.assertIsNotNone(derived.get("speed"))
         self.assertEqual(derived.get("speed_source"), "derived")
-        self.assertAlmostEqual(derived["speed"], 19.47, places=1)
+        self.assertAlmostEqual(derived["speed"], 19.45, places=2)
 
     @patch("subscriberJsonOsmAnd.requests.get")
-    def test_send_osmand_converts_to_knots_exactly_once(self, mock_get):
+    def test_send_osmand_keeps_gnss_knots_as_is(self, mock_get):
         class MockResponse:
             status_code = 200
             text = "OK"
         mock_get.return_value = MockResponse()
 
-        subscriberJsonOsmAnd.send_osmand(0.0, 0.0, speed=36.0)
+        subscriberJsonOsmAnd.send_osmand(0.0, 0.0, speed=10.0)
         args, kwargs = mock_get.call_args
-        self.assertEqual(kwargs["params"]["speed"], "19.4")
+        self.assertEqual(kwargs["params"]["speed"], "10.0")
 
 if __name__ == "__main__":
     unittest.main()
