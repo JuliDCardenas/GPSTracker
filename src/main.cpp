@@ -356,8 +356,6 @@ static uint8_t mqttFailCount = 0;
 static uint32_t mqttNextAttemptMs = 0;
 static uint32_t lteNextAttemptMs = 0;
 static uint32_t lteRetryDelayMs = 5000;
-static uint32_t lteNextAttemptMs = 0;
-static uint32_t lteRetryDelayMs = 5000;
 static uint32_t mqttRetryDelayMs = MQTT_RETRY_BASE_MS;
 // RTC_DATA_ATTR: que sobreviva al deep sleep, para que el forense "boot" vs
 // "mqtt_reconnected" siga significando algo despues de una noche de parqueo.
@@ -744,7 +742,6 @@ static bool waitForAT(uint32_t timeoutMs = 15000) {
   }
   SerialMon.println("AT OK");
   return true;
-  return true;
 }
 
 static bool ensureLTE() {
@@ -753,7 +750,7 @@ static bool ensureLTE() {
   SerialMon.print("Waiting for network...");
   if (!modem.waitForNetwork(30000L)) {
     SerialMon.println(" FAIL");
-    return;
+    return false;
   }
   SerialMon.println(" OK");
 
@@ -773,7 +770,6 @@ static bool ensureLTE() {
   IPAddress ip = modem.localIP();
   SerialMon.print("IP: ");
   SerialMon.println(ip);
-  return true;
   return true;
 }
 
@@ -809,8 +805,6 @@ static bool tryConnectMQTT() {
   // Cierra socket antes de conectar (hipotesis state=-4)
   netClient.stop();
   // Cierra socket antes de conectar (hipotesis state=-4)
-  netClient.stop();
-  mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setKeepAlive(MQTT_KEEPALIVE_SEC);
   mqtt.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SEC);
 
@@ -1091,7 +1085,6 @@ void loop() {
 
   // Mantener sesion MQTT viva
   uint32_t now = millis();
-  uint32_t now = millis();
   if (!modem.isNetworkConnected() || !modem.isGprsConnected()) {
     if (now >= lteNextAttemptMs) {
       SerialMon.println("[NET] down -> reconnect");
@@ -1104,13 +1097,6 @@ void loop() {
       lteNextAttemptMs = millis() + lteRetryDelayMs;
     }
   }
-        lteRetryDelayMs *= 2;
-        if (lteRetryDelayMs > 60000) lteRetryDelayMs = 60000;
-      }
-      lteNextAttemptMs = millis() + lteRetryDelayMs;
-    }
-  }
-
   serviceMQTT();
   mqtt.loop();
 

@@ -254,6 +254,11 @@ def derive_speed_if_needed(d: dict):
 		logging.info("No se deriva velocidad: %.1f km/h fuera de rango", derived_speed_kmh)
 		return d
 
+	d["speed"] = derived_speed_kmh / 1.852
+	d["speed_source"] = "derived"
+	return d
+
+
 
 
 def remember_valid_point(d: dict):
