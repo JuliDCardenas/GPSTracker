@@ -804,7 +804,7 @@ static bool restartModem() {
 static bool tryConnectMQTT() {
   // Cierra socket antes de conectar (hipotesis state=-4)
   netClient.stop();
-  // Cierra socket antes de conectar (hipotesis state=-4)
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setKeepAlive(MQTT_KEEPALIVE_SEC);
   mqtt.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SEC);
 

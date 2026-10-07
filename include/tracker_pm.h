@@ -101,16 +101,12 @@ static bool pmModemSleep() {
   modem.sendAT("+CSCLK=1");
   if (modem.waitResponse(1000) != 1) {
     SerialMon.println("[PM] AT+CSCLK=1 rechazado -> el modem queda despierto");
-    rtcModemAlive = true;
-    return true;
     return false;                 // degrada, no rompe
   }
   pinMode(MODEM_DTR_PIN, OUTPUT);
   digitalWrite(MODEM_DTR_PIN, HIGH);          // DTR alto -> el modem duerme
   gpio_hold_en((gpio_num_t)MODEM_DTR_PIN);    // CLAVE: sostener en deep sleep
   gpio_deep_sleep_hold_en();                  // si no, el pin flota y despierta
-    rtcModemAlive = true;
-    return true;
   return true;
 }
 
@@ -137,10 +133,6 @@ static bool pmModemWake() {
     SerialMon.println("[PM] modem no responde a AT despues de despertar");
   }
   return ok;
-  if (!ok) {
-    SerialMon.println("[PM] modem no responde a AT despues de despertar");
-  }
-  return ok;
 }
 
 // DEFECTO CORREGIDO (2026-08-20): pmParkedTick() llamaba pmModemWake() aun
@@ -155,8 +147,10 @@ static bool pmModemResume() {
   } else {
     SerialMon.println("[PM] modem apagado -> PWRKEY");
     modemPowerOn();
-    waitForAT();
-    rtcModemAlive = true;
+    bool ok = waitForAT();
+    if (ok) rtcModemAlive = true;
+    return ok;
+    return ok;
     return true;
   }
 }
