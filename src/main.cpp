@@ -769,11 +769,13 @@ static void restartModem() {
   waitForAT();
   ensureLTE();
 
-  // PENDIENTE (2026-08-22): tras un restart del modem el GNSS queda apagado y
-  // nadie vuelve a llamar pmGnssOn(). El tracker sigue publicando bateria,
-  // ignicion y la ultima posicion cacheada, pero no vuelve a tener fix fresco
-  // hasta el siguiente arranque del ESP32. No se arregla hoy para no meter
-  // cambios sin probar en el camino de recuperacion.
+  SerialMon.println("[GNSS] reactivando GNSS tras reinicio de modem...");
+  if (gnssPwrOn()) {
+    SerialMon.println("[GNSS] reactivacion OK");
+  } else {
+    // Si falla, no hay nada mas que hacer, se quedara sin posiciones frescas.
+    SerialMon.println("[GNSS] ERROR: el modem no confirmo reactivacion GNSS");
+  }
 }
 
 // Intento único de conexión MQTT. No bloquea el loop.
