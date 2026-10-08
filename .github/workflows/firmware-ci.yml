@@ -15,11 +15,12 @@ jobs:
           python-version: "3.12"
       - run: pip install platformio
       - run: cp include/secrets.example.h include/secrets.h
+      - run: cp include/espnow_secrets.example.h include/espnow_secrets.h
       - run: pio run -e tracker
       - name: Verify version fingerprint
         run: strings .pio/build/tracker/firmware.elf | grep -F "2.3.0-rc1"
       - name: Upload flashable binaries
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: tracker-2.3.0-rc1-${{ github.sha }}
           path: |
