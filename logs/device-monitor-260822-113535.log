@@ -1,0 +1,423 @@
+[   12.7s] [LAB ] estado inicial del modem: MUDO (arranque limpio, como debe ser)
+[   12.7s] [MDM ] pulso PWRKEY (polaridad main.cpp: LOW-HIGH 1000 ms-LOW)
+[   13.8s] [MDM ] responde AT tras 15 ms
+[   14.8s] [AT  ] > ATE0
+[   14.8s] [AT  ] < ATE0  | OK |   (5 ms)
+[   14.8s] [AT  ] > AT+SIMCOMATI
+[   14.8s] [AT  ] < | Manufacturer: SIMCOM INCORPORATED | Model: SIM7670G-MNGV | Revision: 2374B05SIM767XM5A_M | SIM767XM5_B05V01_241206 | IMEI: 864643061465631 | OK |   (18 ms)
+[   14.8s] [AT  ] > AT+CSCLK?
+[   14.8s] [AT  ] < | +CSCLK: 0 | OK |   (6 ms)
+[   14.8s] [AT  ] > AT+CGNSSPWR?
+[   14.8s] [AT  ] < | +CGNSSPWR: 0 | OK |   (6 ms)
+
+[   14.8s] [NET ] --- levantando la red (techo 90 s) ---
+[   14.8s] [AT  ] > AT+CPIN?
+[   14.8s] [AT  ] < | +CPIN: READY | OK |   (6 ms)
+[   14.8s] [AT  ] > AT+CSQ
+[   14.8s] [AT  ] < | +CSQ: 27,0 | OK |   (6 ms)
+[   14.8s] [AT  ] > AT+CEREG?
+[   14.8s] [AT  ] < | +CEREG: 0,2 | OK |   (6 ms)
+[   17.8s] [AT  ] > AT+CEREG?
+[   17.8s] [AT  ] < | +CEREG: 0,2 | OK |   (10 ms)
+[   20.8s] [AT  ] > AT+CEREG?
+[   20.9s] [AT  ] < | +CEREG: 0,5 | OK |   (10 ms)
+[   20.9s] [NET ] registro OK tras 6 s
+[   20.9s] [AT  ] > AT+CCLK?
+[   20.9s] [AT  ] < | +CCLK: "26/08/22,16:35:53-20" | OK |   (17 ms)
+[   20.9s] [AT  ] > AT+CGDCONT?
+[   20.9s] [AT  ] < | +CGDCONT: 1,"IP","internet","172.18.90.34",,,,,,,,,,, | OK |   (11 ms)
+[   20.9s] [AT  ] > AT+CGACT?
+[   20.9s] [AT  ] < | +CGACT: 1,1 | OK |   (11 ms)
+[   20.9s] [AT  ] > AT+NETOPEN
+[   20.9s] [AT  ] < | OK | +NETOPEN: 0 |   (11 ms)
+[   20.9s] [NET ] servicio de sockets: ABIERTO
+[   20.9s] [AT  ] > AT+IPADDR
+[   20.9s] [AT  ] < | +IPADDR: 172.18.90.34 | OK |   (11 ms)
+[   20.9s] [NET ] IP: 172.18.90.34 -> A-GNSS tiene por donde bajar
+[   20.9s] [LAB ] dejo el GNSS apagado 20 s para partir de un estado conocido
+[   20.9s] [AT  ] > AT+CGNSSPWR=0
+[   20.9s] [AT  ] < | OK |   (5 ms)
+
+-----------------------------------------------------------------
+[   40.9s] [P0 ] BASELINE DE CIELO: enciendo GNSS y espero fix crudo (max 240 s)
+-----------------------------------------------------------------
+[   40.9s] [AT  ] > AT+CGDRT=1,1
+[   40.9s] [AT  ] < | OK |   (5 ms)
+[   40.9s] [AT  ] > AT+CGSETV=1,1
+[   40.9s] [AT  ] < | OK |   (5 ms)
+[   40.9s] [AT  ] > AT+CGNSSPWR=1
+[   41.0s] [AT  ] < | OK |   (70 ms)
+[   43.0s] [GNSS] AT+CGNSSPWR=1 -> OK (sin READY, normal en este firmware) tras 2070 ms
+[   47.1s] [P0 ] t=6s sats=0 hdop=-1.0 (sin fix aun)
+[   52.1s] [P0 ] t=11s sats=0 hdop=-1.0 (sin fix aun)
+[   57.2s] [P0 ] t=16s sats=0 hdop=-1.0 (sin fix aun)
+[   62.2s] [P0 ] t=21s sats=0 hdop=-1.0 (sin fix aun)
+[   67.3s] [P0 ] t=26s sats=0 hdop=-1.0 (sin fix aun)
+[   72.3s] [P0 ] t=31s sats=0 hdop=-1.0 (sin fix aun)
+[   77.4s] [P0 ] t=36s sats=0 hdop=-1.0 (sin fix aun)
+[   80.4s] [P0 ] fix crudo a los 39 s  sats=23 hdop=1.6 marca=220826/163711.000 -> el cielo alcanza
+
+[   80.4s] [LAB ] sondeo de capacidades con el motor ENCENDIDO (informativo)
+[   80.4s] [AT  ] > AT+CGNSSPROD
+[   81.9s] [AT  ] < | PRODUCT: B03V01AG3352B | OK |   (1511 ms)
+[   81.9s] [AT  ] > AT+CGNSSMODE?
+[   81.9s] [AT  ] < | +CGNSSMODE: 15 | OK |   (10 ms)
+[   81.9s] [AT  ] > AT+CGNSSRTC?
+[   82.0s] [AT  ] < | ERROR |   (11 ms)
+[   82.0s] [AT  ] > AT+CGNSSSLEEP=?
+[   82.0s] [AT  ] < | ERROR |   (5 ms)
+[   82.0s] [AT  ] > AT+CGNSSFLP=?
+[   82.0s] [AT  ] < | +CGNSSFLP: (0,1),(3-518400),(3-518400),(3-518400),(3-518400) | OK |   (11 ms)
+[   82.0s] [AT  ] > AT+CGNSSAGPS=?
+[   82.0s] [AT  ] < | ERROR |   (6 ms)
+[   82.0s] [LAB ] pruebo AT+CGPSHOT ejecutandolo (no tiene forma de test)
+[   82.0s] [AT  ] > AT+CGPSHOT
+[   82.0s] [AT  ] < | OK |   (5 ms)
+[   82.0s] [LAB ] CGPSHOT=si -> la familia CGPSxxx existe en este firmware
+[   82.0s] [AT  ] > AT+CGNSSPWR=0
+[   82.0s] [AT  ] < | OK |   (10 ms)
+[   82.0s] [P0 ] GNSS apagado, enfriando 150 s
+[  112.0s] [P0 ] enfriando 30/150 s
+[  142.0s] [P0 ] enfriando 60/150 s
+[  172.0s] [P0 ] enfriando 90/150 s
+[  202.0s] [P0 ] enfriando 120/150 s
+[  232.0s] [P0 ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[  232.0s] [T1 ] INICIO  warm_ctrl   pre=nada  start=pwr
+-----------------------------------------------------------------
+[  232.0s] [T1 ] Vbat aprox 4.16 V
+[  232.0s] [T1 ] marca del fix anterior: 220826/163711.000 (cualquier trama con esta marca se descarta)
+[  232.0s] [T1 ] el GNSS lleva 150 s sin trabajar
+[  232.0s] [AT  ] > AT+CGDRT=1,1
+[  232.1s] [AT  ] < | OK |   (6 ms)
+[  232.1s] [AT  ] > AT+CGSETV=1,1
+[  232.1s] [AT  ] < | OK |   (5 ms)
+[  232.1s] [AT  ] > AT+CGNSSPWR=1
+[  232.1s] [AT  ] < | OK |   (70 ms)
+[  234.1s] [GNSS] AT+CGNSSPWR=1 -> OK (sin READY, normal en este firmware) tras 2070 ms
+[  234.1s] [T1 ] t=2s poll=1 fix=no sats=0 hdop=-1.0 vacios=1 rancias=0 err=0
+[  238.2s] [T1 ] t=6s poll=5 fix=no sats=0 hdop=-1.0 vacios=5 rancias=0 err=0
+[  243.2s] [T1 ] t=11s poll=10 fix=no sats=0 hdop=-1.0 vacios=10 rancias=0 err=0
+[  248.3s] [T1 ] t=16s poll=15 fix=no sats=0 hdop=-1.0 vacios=15 rancias=0 err=0
+[  253.3s] [T1 ] t=21s poll=20 fix=no sats=0 hdop=-1.0 vacios=20 rancias=0 err=0
+[  254.4s] [T1 ] *** FIX CRUDO a los 22 s   sats=26 hdop=1.6 marca=220826/164005.000
+[  254.4s] [T1 ] *** FIX QUE PASA EL GATE a los 22 s   sats=26 hdop=1.6
+[  254.4s] [AT  ] > AT+CGNSSMODE?
+[  254.4s] [AT  ] < | +CGNSSMODE: 15 | OK |   (10 ms)
+[  254.4s] [T1 ] CGNSSMODE con GNSS encendido: 15
+[  254.4s] [AT  ] > AT+CGNSSPWR=0
+[  254.4s] [AT  ] < | OK |   (10 ms)
+[  254.4s] [T1 ] FIN
+[  254.4s] [T1 ] GNSS apagado, enfriando 150 s
+[  284.4s] [T1 ] enfriando 30/150 s
+[  314.4s] [T1 ] enfriando 60/150 s
+[  344.4s] [T1 ] enfriando 90/150 s
+[  374.4s] [T1 ] enfriando 120/150 s
+[  404.4s] [T1 ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[  404.4s] [T4 ] INICIO  hot_cmd   pre=nada  start=hot
+-----------------------------------------------------------------
+[  404.4s] [T4 ] Vbat aprox 4.18 V
+[  404.4s] [T4 ] marca del fix anterior: 220826/164005.000 (cualquier trama con esta marca se descarta)
+[  404.4s] [T4 ] el GNSS lleva 150 s sin trabajar
+[  404.4s] [AT  ] > AT+CGDRT=1,1
+[  404.4s] [AT  ] < | OK |   (6 ms)
+[  404.4s] [AT  ] > AT+CGSETV=1,1
+[  404.4s] [AT  ] < | OK |   (5 ms)
+[  404.4s] [AT  ] > AT+CGNSSPWR=1
+[  404.5s] [AT  ] < | OK |   (70 ms)
+[  406.5s] [GNSS] AT+CGNSSPWR=1 -> OK (sin READY, normal en este firmware) tras 2070 ms
+[  406.5s] [AT  ] > AT+CGPSHOT
+[  406.5s] [AT  ] < | OK |   (5 ms)
+[  406.5s] [GNSS] empujon AT+CGPSHOT a los 2070 ms del encendido: aceptado
+[  406.5s] [T4 ] t=2s poll=1 fix=no sats=0 hdop=-1.0 vacios=1 rancias=0 err=0
+[  410.6s] [T4 ] t=6s poll=5 fix=no sats=0 hdop=-1.0 vacios=5 rancias=0 err=0
+[  415.6s] [T4 ] t=11s poll=10 fix=no sats=0 hdop=-1.0 vacios=10 rancias=0 err=0
+[  420.7s] [T4 ] t=16s poll=15 fix=no sats=0 hdop=-1.0 vacios=15 rancias=0 err=0
+[  421.7s] [T4 ] *** FIX CRUDO a los 17 s   sats=25 hdop=1.7 marca=220826/164252.000
+[  421.7s] [T4 ] *** FIX QUE PASA EL GATE a los 17 s   sats=25 hdop=1.7
+[  421.7s] [AT  ] > AT+CGNSSMODE?
+[  421.7s] [AT  ] < | +CGNSSMODE: 15 | OK |   (10 ms)
+[  421.7s] [T4 ] CGNSSMODE con GNSS encendido: 15
+[  421.7s] [AT  ] > AT+CGNSSPWR=0
+[  421.7s] [AT  ] < | OK |   (10 ms)
+[  421.7s] [T4 ] FIN
+[  421.7s] [T4 ] GNSS apagado, enfriando 150 s
+[  451.7s] [T4 ] enfriando 30/150 s
+[  481.7s] [T4 ] enfriando 60/150 s
+[  511.7s] [T4 ] enfriando 90/150 s
+[  541.7s] [T4 ] enfriando 120/150 s
+[  571.7s] [T4 ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[  571.7s] [T9 ] INICIO  agps   pre=nada  start=agps
+-----------------------------------------------------------------
+[  571.8s] [T9 ] Vbat aprox 4.18 V
+[  571.8s] [T9 ] marca del fix anterior: 220826/164252.000 (cualquier trama con esta marca se descarta)
+[  571.8s] [T9 ] el GNSS lleva 150 s sin trabajar
+[  571.8s] [AT  ] > AT+CGDRT=1,1
+[  571.8s] [AT  ] < | OK |   (6 ms)
+[  571.8s] [AT  ] > AT+CGSETV=1,1
+[  571.8s] [AT  ] < | OK |   (5 ms)
+[  571.8s] [AT  ] > AT+CGNSSPWR=1
+[  571.9s] [AT  ] < | OK |   (70 ms)
+[  573.9s] [GNSS] AT+CGNSSPWR=1 -> OK (sin READY, normal en este firmware) tras 2070 ms
+[  573.9s] [AT  ] > AT+CAGPS
+[  573.9s] [AT  ] < | OK |   (5 ms)
+[  573.9s] [GNSS] empujon AT+CAGPS a los 2070 ms del encendido: aceptado
+[  573.9s] [T9 ] t=2s poll=1 fix=no sats=0 hdop=-1.0 vacios=1 rancias=0 err=0
+[  577.9s] [T9 ] t=6s poll=5 fix=no sats=0 hdop=-1.0 vacios=5 rancias=0 err=0
+[  583.0s] [T9 ] t=11s poll=10 fix=no sats=0 hdop=-1.0 vacios=10 rancias=0 err=0
+[  588.0s] [T9 ] t=16s poll=15 fix=no sats=0 hdop=-1.0 vacios=15 rancias=0 err=0
+[  593.1s] [T9 ] t=21s poll=20 fix=no sats=0 hdop=-1.0 vacios=20 rancias=0 err=0
+[  598.1s] [T9 ] t=26s poll=25 fix=no sats=0 hdop=-1.0 vacios=25 rancias=0 err=0
+[  603.2s] [T9 ] t=31s poll=30 fix=no sats=0 hdop=-1.0 vacios=30 rancias=0 err=0
+[  608.2s] [T9 ] t=36s poll=35 fix=no sats=0 hdop=-1.0 vacios=35 rancias=0 err=0
+[  613.3s] [T9 ] t=41s poll=40 fix=no sats=0 hdop=-1.0 vacios=40 rancias=0 err=0
+[  618.4s] [T9 ] t=46s poll=45 fix=no sats=0 hdop=-1.0 vacios=45 rancias=0 err=0
+[  623.4s] [T9 ] t=51s poll=50 fix=no sats=0 hdop=-1.0 vacios=50 rancias=0 err=0
+[  628.5s] [T9 ] t=56s poll=55 fix=no sats=0 hdop=-1.0 vacios=55 rancias=0 err=0
+[  633.5s] [T9 ] t=61s poll=60 fix=no sats=0 hdop=-1.0 vacios=60 rancias=0 err=0
+[  638.6s] [T9 ] t=66s poll=65 fix=no sats=0 hdop=-1.0 vacios=65 rancias=0 err=0
+[  643.6s] [T9 ] t=71s poll=70 fix=no sats=0 hdop=-1.0 vacios=70 rancias=0 err=0
+[  648.7s] [T9 ] t=76s poll=75 fix=no sats=0 hdop=-1.0 vacios=75 rancias=0 err=0
+[  653.7s] [T9 ] t=81s poll=80 fix=no sats=0 hdop=-1.0 vacios=80 rancias=0 err=0
+[  658.8s] [T9 ] t=87s poll=85 fix=no sats=0 hdop=-1.0 vacios=85 rancias=0 err=0
+[  663.8s] [T9 ] t=92s poll=90 fix=no sats=0 hdop=-1.0 vacios=90 rancias=0 err=0
+[  668.9s] [T9 ] t=97s poll=95 fix=no sats=0 hdop=-1.0 vacios=95 rancias=0 err=0
+[  674.0s] [T9 ] t=102s poll=100 fix=no sats=0 hdop=-1.0 vacios=100 rancias=0 err=0
+[  679.0s] [T9 ] t=107s poll=105 fix=no sats=0 hdop=-1.0 vacios=105 rancias=0 err=0
+[  684.1s] [T9 ] t=112s poll=110 fix=no sats=0 hdop=-1.0 vacios=110 rancias=0 err=0
+[  689.1s] [T9 ] t=117s poll=115 fix=no sats=0 hdop=-1.0 vacios=115 rancias=0 err=0
+[  694.2s] [T9 ] t=122s poll=120 fix=no sats=0 hdop=-1.0 vacios=120 rancias=0 err=0
+[  699.2s] [T9 ] t=127s poll=125 fix=no sats=0 hdop=-1.0 vacios=125 rancias=0 err=0
+[  704.3s] [T9 ] t=132s poll=130 fix=no sats=0 hdop=-1.0 vacios=130 rancias=0 err=0
+[  709.3s] [T9 ] t=137s poll=135 fix=no sats=0 hdop=-1.0 vacios=135 rancias=0 err=0
+[  714.4s] [T9 ] t=142s poll=140 fix=no sats=0 hdop=-1.0 vacios=140 rancias=0 err=0
+[  719.5s] [T9 ] t=147s poll=145 fix=no sats=0 hdop=-1.0 vacios=145 rancias=0 err=0
+[  724.5s] [T9 ] t=152s poll=150 fix=no sats=0 hdop=-1.0 vacios=150 rancias=0 err=0
+[  729.6s] [T9 ] t=157s poll=155 fix=no sats=0 hdop=-1.0 vacios=155 rancias=0 err=0
+[  734.6s] [T9 ] t=162s poll=160 fix=no sats=0 hdop=-1.0 vacios=160 rancias=0 err=0
+[  739.7s] [T9 ] t=167s poll=165 fix=no sats=0 hdop=-1.0 vacios=165 rancias=0 err=0
+[  744.7s] [T9 ] t=172s poll=170 fix=no sats=0 hdop=-1.0 vacios=170 rancias=0 err=0
+[  749.8s] [T9 ] t=177s poll=175 fix=no sats=0 hdop=-1.0 vacios=175 rancias=0 err=0
+[  754.8s] [T9 ] t=183s poll=180 fix=no sats=0 hdop=-1.0 vacios=180 rancias=0 err=0
+[  759.9s] [T9 ] t=188s poll=185 fix=no sats=0 hdop=-1.0 vacios=185 rancias=0 err=0
+[  763.9s] [T9 ] *** FIX CRUDO a los 192 s   sats=9 hdop=1.9 marca=220826/164835.000
+[  763.9s] [T9 ] *** FIX QUE PASA EL GATE a los 192 s   sats=9 hdop=1.9
+[  763.9s] [AT  ] > AT+CGNSSMODE?
+[  764.0s] [AT  ] < | +CGNSSMODE: 15 | OK |   (10 ms)
+[  764.0s] [T9 ] CGNSSMODE con GNSS encendido: 15
+[  764.0s] [AT  ] > AT+CGNSSPWR=0
+[  764.0s] [AT  ] < | OK |   (10 ms)
+[  764.0s] [T9 ] FIN
+[  764.0s] [T9 ] GNSS apagado, enfriando 150 s
+[  794.0s] [T9 ] enfriando 30/150 s
+[  824.0s] [T9 ] enfriando 60/150 s
+[  854.0s] [T9 ] enfriando 90/150 s
+[  884.0s] [T9 ] enfriando 120/150 s
+[  914.0s] [T9 ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[  914.0s] [T10 ] INICIO  gnss_sleep   pre=gnss_sleep  start=wakeup
+-----------------------------------------------------------------
+[  914.0s] [T10 ] Vbat aprox 4.18 V
+[  914.0s] [T10 ] marca del fix anterior: 220826/164835.000 (cualquier trama con esta marca se descarta)
+[  914.0s] [GNSS] --- pre: enciendo el motor y busco fix antes de dormirlo ---
+[  914.0s] [AT  ] > AT+CGDRT=1,1
+[  914.0s] [AT  ] < | OK |   (6 ms)
+[  914.0s] [AT  ] > AT+CGSETV=1,1
+[  914.0s] [AT  ] < | OK |   (5 ms)
+[  914.0s] [AT  ] > AT+CGNSSPWR=1
+[  914.1s] [AT  ] < | OK |   (70 ms)
+[  934.3s] [GNSS] pre-sueno t=20s sats=0 hdop=-1.0 (sin fix aun)
+[  945.4s] [GNSS] pre-sueno: fix con marca 220826/165136.000
+[  945.4s] [GNSS] pre-sueno: FIX conseguido tras 31 s
+[  945.4s] [AT  ] > AT+CGNSSSLEEP
+[  945.4s] [AT  ] < | OK |   (10 ms)
+[  945.4s] [GNSS] CGNSSSLEEP aceptado: el motor NO se apago, solo duerme
+[  945.4s] [GNSS] espero 150 s con el motor dormido
+[  975.4s] [GNSS] 30/150 s
+[ 1005.4s] [GNSS] 60/150 s
+[ 1035.4s] [GNSS] 90/150 s
+[ 1065.4s] [GNSS] 120/150 s
+[ 1095.4s] [GNSS] 150/150 s
+[ 1095.4s] [T10 ] el GNSS lleva 150 s sin trabajar
+[ 1095.4s] [AT  ] > AT+CGNSSWAKEUP
+[ 1095.5s] [AT  ] < | OK |   (70 ms)
+[ 1095.5s] [GNSS] motor despertado sin volver a encenderlo
+[ 1095.5s] [T10 ] t=0s TRAMA RANCIA: fix con la marca del fix anterior (220826/165136.000), sats=27 hdop=1.4. No es nueva. Sigo cronometrando.
+[ 1096.5s] [T10 ] t=1s poll=2 fix=no sats=0 hdop=-1.0 vacios=1 rancias=1 err=0
+[ 1099.6s] [T10 ] t=4s poll=5 fix=no sats=0 hdop=-1.0 vacios=4 rancias=1 err=0
+[ 1104.6s] [T10 ] t=9s poll=10 fix=no sats=0 hdop=-1.0 vacios=9 rancias=1 err=0
+[ 1109.7s] [T10 ] t=14s poll=15 fix=no sats=0 hdop=-1.0 vacios=14 rancias=1 err=0
+[ 1114.7s] [T10 ] t=19s poll=20 fix=no sats=0 hdop=-1.0 vacios=19 rancias=1 err=0
+[ 1119.8s] [T10 ] t=24s poll=25 fix=no sats=0 hdop=-1.0 vacios=24 rancias=1 err=0
+[ 1124.8s] [T10 ] t=29s poll=30 fix=no sats=0 hdop=-1.0 vacios=29 rancias=1 err=0
+[ 1129.9s] [T10 ] t=34s poll=35 fix=no sats=0 hdop=-1.0 vacios=34 rancias=1 err=0
+[ 1135.0s] [T10 ] t=39s poll=40 fix=no sats=0 hdop=-1.0 vacios=39 rancias=1 err=0
+[ 1140.0s] [T10 ] t=44s poll=45 fix=no sats=0 hdop=-1.0 vacios=44 rancias=1 err=0
+[ 1141.0s] [T10 ] *** FIX CRUDO a los 45 s   sats=31 hdop=1.3 marca=220826/165452.000
+[ 1141.0s] [T10 ] *** FIX QUE PASA EL GATE a los 45 s   sats=31 hdop=1.3
+[ 1141.0s] [AT  ] > AT+CGNSSMODE?
+[ 1141.0s] [AT  ] < | +CGNSSMODE: 15 | OK |   (10 ms)
+[ 1141.0s] [T10 ] CGNSSMODE con GNSS encendido: 15
+[ 1141.0s] [AT  ] > AT+CGNSSPWR=0
+[ 1141.1s] [AT  ] < | OK |   (10 ms)
+[ 1141.1s] [T10 ] FIN
+[ 1141.1s] [T10 ] GNSS apagado, enfriando 150 s
+[ 1171.1s] [T10 ] enfriando 30/150 s
+[ 1201.1s] [T10 ] enfriando 60/150 s
+[ 1231.1s] [T10 ] enfriando 90/150 s
+[ 1261.1s] [T10 ] enfriando 120/150 s
+[ 1291.1s] [T10 ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[ 1291.1s] [T5 ] INICIO  warm_cmd   pre=nada  start=warm
+-----------------------------------------------------------------
+[ 1291.1s] [T5 ] Vbat aprox 4.19 V
+[ 1291.1s] [T5 ] marca del fix anterior: 220826/165452.000 (cualquier trama con esta marca se descarta)
+[ 1291.1s] [T5 ] el GNSS lleva 150 s sin trabajar
+[ 1291.1s] [AT  ] > AT+CGDRT=1,1
+[ 1291.1s] [AT  ] < | OK |   (6 ms)
+[ 1291.1s] [AT  ] > AT+CGSETV=1,1
+[ 1291.1s] [AT  ] < | OK |   (5 ms)
+[ 1291.1s] [AT  ] > AT+CGNSSPWR=1
+[ 1291.2s] [AT  ] < | OK |   (70 ms)
+[ 1293.2s] [GNSS] AT+CGNSSPWR=1 -> OK (sin READY, normal en este firmware) tras 2070 ms
+[ 1293.2s] [AT  ] > AT+CGPSWARM
+[ 1293.2s] [AT  ] < | OK |   (5 ms)
+[ 1293.2s] [GNSS] empujon AT+CGPSWARM a los 2070 ms del encendido: aceptado
+[ 1293.2s] [T5 ] t=2s poll=1 fix=no sats=0 hdop=-1.0 vacios=1 rancias=0 err=0
+[ 1297.2s] [T5 ] t=6s poll=5 fix=no sats=0 hdop=-1.0 vacios=5 rancias=0 err=0
+[ 1302.3s] [T5 ] t=11s poll=10 fix=no sats=0 hdop=-1.0 vacios=10 rancias=0 err=0
+[ 1307.4s] [T5 ] t=16s poll=15 fix=no sats=0 hdop=-1.0 vacios=15 rancias=0 err=0
+[ 1312.4s] [T5 ] t=21s poll=20 fix=no sats=0 hdop=-1.0 vacios=20 rancias=0 err=0
+[ 1317.5s] [T5 ] *** FIX CRUDO a los 26 s   sats=23 hdop=1.7 marca=220826/165748.094
+[ 1317.5s] [T5 ] *** FIX QUE PASA EL GATE a los 26 s   sats=23 hdop=1.7
+[ 1317.5s] [AT  ] > AT+CGNSSMODE?
+[ 1317.5s] [AT  ] < | +CGNSSMODE: 15 | OK |   (10 ms)
+[ 1317.5s] [T5 ] CGNSSMODE con GNSS encendido: 15
+[ 1317.5s] [AT  ] > AT+CGNSSPWR=0
+[ 1317.5s] [AT  ] < | OK |   (10 ms)
+[ 1317.5s] [T5 ] FIN
+[ 1317.5s] [AT  ] > AT+CGNSSPWR=0
+[ 1317.5s] [AT  ] < | OK |   (5 ms)
+
+=================================================================
+ RESUMEN GNSS LAB 1.4 - arranque asistido, A-GNSS y sueno del motor
+=================================================================
+ cielo (baseline): fix crudo en 39 s, sats 23, hdop 1.6
+ red: arriba (IP 172.18.90.34)
+ familia CGPSxxx: CGPSHOT=si
+ guardia de trama rancia: activo, 1 descartada(s) en total
+-----------------------------------------------------------------
+run  variable      pre           start     off_s ttff_raw ttff_val  sats  hdop vacios rancias   err  nota
+T1   warm_ctrl     nada          pwr        150s      22s      22s    26   1.6     20       0     0  -
+T4   hot_cmd       nada          hot        150s      17s      17s    25   1.7     15       0     0  AT+CGPSHOT OK
+T9   agps          nada          agps       150s     192s     192s     9   1.9    188       0     0  AT+CAGPS OK
+T10  gnss_sleep    gnss_sleep    wakeup     150s      45s      45s    31   1.3     44       1     0  motor dormido con CGNSSSLEEP tras fix; CGNSSWAKEUP OK; descarto 1 trama(s) rancia(s)
+T5   warm_cmd      nada          warm       150s      26s      26s    23   1.7     24       0     0  AT+CGPSWARM OK
+
+=== CSV (pegar en el log de sesion) ===
+run,variable,pre,start,off_s,ttff_raw_s,ttff_valid_s,sats,hdop,polls_vacios,polls_rancios,polls_error,polls_total,ready,mode_post,vbat,utc_fix,nota
+T1,warm_ctrl,nada,pwr,150,22,22,26,1.6,20,0,0,21,no,15,4.16,220826/164005.000,-
+T4,hot_cmd,nada,hot,150,17,17,25,1.7,15,0,0,16,no,15,4.18,220826/164252.000,AT+CGPSHOT OK
+T9,agps,nada,agps,150,192,192,9,1.9,188,0,0,189,no,15,4.18,220826/164835.000,AT+CAGPS OK
+T10,gnss_sleep,gnss_sleep,wakeup,150,45,45,31,1.3,44,1,0,46,no,15,4.18,220826/165452.000,motor dormido con CGNSSSLEEP tras fix; CGNSSWAKEUP OK; descarto 1 trama(s) rancia(s)
+T5,warm_cmd,nada,warm,150,26,26,23,1.7,24,0,0,25,no,15,4.19,220826/165748.094,AT+CGPSWARM OK
+P0,baseline_cielo,-,pwr,0,39,-1,23,1.6,0,0,0,0,no,-,0.00,220826/163711.000,cielo suficiente
+=== fin CSV ===
+
+Como se lee, en orden de importancia:
+ 0. La columna 'rancias' primero. Si sale mayor que cero en cualquier
+    corrida, el modem SI devuelve la posicion vieja al encender y eso es
+    un defecto de produccion: main.cpp publicaria esa posicion como
+    actual. Hay que meter el chequeo de fecha/hora en readGpsPoint (F22).
+    Si sale cero en todas, el fix de 0 s de T4 en la v1.2 fue una
+    readquisicion genuina y tambien es buena noticia.
+ 1. T5 (warm) DEBE salir mas lento que T1. Warm start descarta efemerides
+    por definicion. Si T5 sale igual que T1, el firmware esta IGNORANDO la
+    familia CGPSxxx y entonces T4 no prueba nada: todo el bloque se cae.
+ 2. Con T5 mas lento, T4 (hot) ya se puede leer:
+      T4 < T1  -> hay que meter CGPSHOT en pmGnssOn. Entra en F19.
+      T4 = T1  -> CGNSSPWR=1 ya hace hot start solo. Tema cerrado.
+ 3. T9 (agps) decide el escenario de 24 h estacionado, donde el frio es
+    inevitable porque el corte de energia borra las efemerides.
+    Comparar T9 contra los 117 s de R0, NO contra T1.
+      T9 muy por debajo de 117 s -> A-GNSS entra al tracker y cambia F23.
+      Si la IP salio ERROR, T9 no es valida: no concluir nada de ella.
+ 4. T10 (gnss_sleep) decide el estacionado corto:
+      T10 << T1 y rancias=0 -> dormir el motor en vez de apagarlo. Falta
+                   medir consumo con el multimetro antes de cambiar nada.
+      T10 << T1 pero rancias>0 -> era la trama vieja. No cambiar nada.
+      nota 'CGNSSSLEEP no soportado' -> tema cerrado, seguimos apagando.
+ 5. off_s tiene que salir parecido en T1, T4, T5 y T9 (~150 s). Si alguna
+    se dispara, esa corrida no es comparable y hay que repetirla.
+ 6. Piso de ruido medido el 2026-08-22 con cielo bueno: +/- 4 s (T1=22 s
+    y T5=26 s en la misma condicion). Diferencias menores no significan
+    nada.
+
+Este env NO es el tracker. Para volver a produccion:
+  pio run -e tracker -t upload
+=================================================================
+
+=================================================================
+ RESUMEN GNSS LAB 1.4 - arranque asistido, A-GNSS y sueno del motor
+=================================================================
+ cielo (baseline): fix crudo en 39 s, sats 23, hdop 1.6
+ red: arriba (IP 172.18.90.34)
+ familia CGPSxxx: CGPSHOT=si
+ guardia de trama rancia: activo, 1 descartada(s) en total
+-----------------------------------------------------------------
+run  variable      pre           start     off_s ttff_raw ttff_val  sats  hdop vacios rancias   err  nota
+T1   warm_ctrl     nada          pwr        150s      22s      22s    26   1.6     20       0     0  -
+T4   hot_cmd       nada          hot        150s      17s      17s    25   1.7     15       0     0  AT+CGPSHOT OK
+T9   agps          nada          agps       150s     192s     192s     9   1.9    188       0     0  AT+CAGPS OK
+T10  gnss_sleep    gnss_sleep    wakeup     150s      45s      45s    31   1.3     44       1     0  motor dormido con CGNSSSLEEP tras fix; CGNSSWAKEUP OK; descarto 1 trama(s) rancia(s)
+T5   warm_cmd      nada          warm       150s      26s      26s    23   1.7     24       0     0  AT+CGPSWARM OK
+
+=== CSV (pegar en el log de sesion) ===
+run,variable,pre,start,off_s,ttff_raw_s,ttff_valid_s,sats,hdop,polls_vacios,polls_rancios,polls_error,polls_total,ready,mode_post,vbat,utc_fix,nota
+T1,warm_ctrl,nada,pwr,150,22,22,26,1.6,20,0,0,21,no,15,4.16,220826/164005.000,-
+T4,hot_cmd,nada,hot,150,17,17,25,1.7,15,0,0,16,no,15,4.18,220826/164252.000,AT+CGPSHOT OK
+T9,agps,nada,agps,150,192,192,9,1.9,188,0,0,189,no,15,4.18,220826/164835.000,AT+CAGPS OK
+T10,gnss_sleep,gnss_sleep,wakeup,150,45,45,31,1.3,44,1,0,46,no,15,4.18,220826/165452.000,motor dormido con CGNSSSLEEP tras fix; CGNSSWAKEUP OK; descarto 1 trama(s) rancia(s)
+T5,warm_cmd,nada,warm,150,26,26,23,1.7,24,0,0,25,no,15,4.19,220826/165748.094,AT+CGPSWARM OK
+P0,baseline_cielo,-,pwr,0,39,-1,23,1.6,0,0,0,0,no,-,0.00,220826/163711.000,cielo suficiente
+=== fin CSV ===
+
+Como se lee, en orden de importancia:
+ 0. La columna 'rancias' primero. Si sale mayor que cero en cualquier
+    corrida, el modem SI devuelve la posicion vieja al encender y eso es
+    un defecto de produccion: main.cpp publicaria esa posicion como
+    actual. Hay que meter el chequeo de fecha/hora en readGpsPoint (F22).
+    Si sale cero en todas, el fix de 0 s de T4 en la v1.2 fue una
+    readquisicion genuina y tambien es buena noticia.
+ 1. T5 (warm) DEBE salir mas lento que T1. Warm start descarta efemerides
+    por definicion. Si T5 sale igual que T1, el firmware esta IGNORANDO la
+    familia CGPSxxx y entonces T4 no prueba nada: todo el bloque se cae.
+ 2. Con T5 mas lento, T4 (hot) ya se puede leer:
+      T4 < T1  -> hay que meter CGPSHOT en pmGnssOn. Entra en F19.
+      T4 = T1  -> CGNSSPWR=1 ya hace hot start solo. Tema cerrado.
+ 3. T9 (agps) decide el escenario de 24 h estacionado, donde el frio es
+    inevitable porque el corte de energia borra las efemerides.
+    Comparar T9 contra los 117 s de R0, NO contra T1.
+      T9 muy por debajo de 117 s -> A-GNSS entra al tracker y cambia F23.
+      Si la IP salio ERROR, T9 no es valida: no concluir nada de ella.
+ 4. T10 (gnss_sleep) decide el estacionado corto:
+      T10 << T1 y rancias=0 -> dormir el motor en vez de apagarlo. Falta
+                   medir consumo con el multimetro antes de cambiar nada.
+      T10 << T1 pero rancias>0 -> era la trama vieja. No cambiar nada.
+      nota 'CGNSSSLEEP no soportado' -> tema cerrado, seguimos apagando.
+ 5. off_s tiene que salir parecido en T1, T4, T5 y T9 (~150 s). Si alguna
+    se dispara, esa corrida no es comparable y hay que repetirla.
+ 6. Piso de ruido medido el 2026-08-22 con cielo bueno: +/- 4 s (T1=22 s
+    y T5=26 s en la misma condicion). Diferencias menores no significan
+    nada.
+
+Este env NO es el tracker. Para volver a produccion:
+  pio run -e tracker -t upload
+=================================================================

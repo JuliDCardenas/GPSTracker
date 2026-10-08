@@ -1,0 +1,406 @@
+
+=================================================================
+ GPS Tracker Logan - GNSS LAB
+=================================================================
+ version  : gnss_lab 1.1
+ build    : Aug 22 2026 01:05:06
+ reset    : POWERON
+ corridas : 6 activas, techo 300 s de fix, 150 s de enfriado
+ duracion : hasta ~60 min en el peor caso
+ gate     : sats >= 5 y HDOP <= 2.5 (igual que main.cpp)
+ filtro   : P0 exige fix crudo en 240 s o aborta
+=================================================================
+  P0 baseline_cielo  filtro y NVRAM caliente
+  R0 cold_ref      pre=cpof+pwrkey   post=baud+mode  
+  R1 warm_ctrl     pre=nada          post=nada       
+  R2 creset        pre=creset        post=nada       
+  R3 dtr_sleep     pre=dtr_sleep     post=nada       
+  R4 cgnssmode15   pre=nada          post=baud+mode  
+  R5 pwrkey_pulse  pre=pwrkey_pulse  post=nada       
+  R6 baud_only     pre=nada          post=baud       (desactivada)
+=================================================================
+[    2.5s] [LAB ] arranco en 10 s (manda cualquier tecla para empezar ya)
+[   14.7s] [LAB ] estado inicial del modem: MUDO (arranque limpio, como debe ser)
+[   14.7s] [MDM ] pulso PWRKEY (polaridad main.cpp: LOW-HIGH 1000 ms-LOW)
+[   15.8s] [MDM ] responde AT tras 15 ms
+[   16.8s] [AT  ] > ATE0
+[   16.8s] [AT  ] < ATE0  | OK |   (5 ms)
+[   16.8s] [AT  ] > AT+SIMCOMATI
+[   16.8s] [AT  ] < | Manufacturer: SIMCOM INCORPORATED | Model: SIM7670G-MNGV | Revision: 2374B05SIM767XM5A_M | SIM767XM5_B05V01_241206 | IMEI: 864643061465631 | OK |   (19 ms)
+[   16.8s] [AT  ] > AT+CSCLK?
+[   16.8s] [AT  ] < | +CSCLK: 0 | OK |   (6 ms)
+[   16.8s] [AT  ] > AT+CGNSSPWR?
+[   16.8s] [AT  ] < | +CGNSSPWR: 0 | OK |   (10 ms)
+[   16.8s] [AT  ] > AT+CGNSSMODE?
+[   16.8s] [AT  ] < | ERROR |   (5 ms)
+[   16.8s] [AT  ] > AT+CGNSSCOLD=?
+[   16.8s] [AT  ] < | ERROR |   (10 ms)
+[   16.8s] [LAB ] dejo el GNSS apagado 20 s para partir de un estado conocido
+[   16.8s] [AT  ] > AT+CGNSSPWR=0
+[   16.8s] [AT  ] < | OK |   (5 ms)
+
+-----------------------------------------------------------------
+[   36.8s] [P0  ] BASELINE DE CIELO: enciendo GNSS y espero fix crudo (max 240 s)
+-----------------------------------------------------------------
+[   36.8s] [AT  ] > AT+CGDRT=1,1
+[   36.8s] [AT  ] < | OK |   (5 ms)
+[   36.8s] [AT  ] > AT+CGSETV=1,1
+[   36.9s] [AT  ] < | OK |   (5 ms)
+[   36.9s] [AT  ] > AT+CGNSSPWR=1
+[   36.9s] [AT  ] < | OK |   (70 ms)
+[   66.9s] [GNSS] CGNSSPWR=1 -> sin READY tras 30070 ms
+[   75.0s] [P0  ] t=38s sats=0 hdop=-1.0 (sin fix aun)
+[   85.0s] [P0  ] t=48s sats=0 hdop=-1.0 (sin fix aun)
+[   95.1s] [P0  ] t=58s sats=0 hdop=-1.0 (sin fix aun)
+[  105.1s] [P0  ] t=68s sats=0 hdop=-1.0 (sin fix aun)
+[  115.2s] [P0  ] t=78s sats=0 hdop=-1.0 (sin fix aun)
+[  125.3s] [P0  ] t=88s sats=0 hdop=-1.0 (sin fix aun)
+[  135.3s] [P0  ] t=98s sats=0 hdop=-1.0 (sin fix aun)
+[  145.4s] [P0  ] t=108s sats=0 hdop=-1.0 (sin fix aun)
+[  155.4s] [P0  ] t=118s sats=0 hdop=-1.0 (sin fix aun)
+[  161.5s] [AT  ] > AT+CGNSSPWR=0
+[  161.5s] [AT  ] < | OK |   (10 ms)
+[  161.5s] [P0  ] fix crudo a los 124 s  sats=26 hdop=1.7 -> el cielo alcanza
+[  161.5s] [P0  ] GNSS apagado, enfriando 150 s
+[  191.5s] [P0  ] enfriando 30/150 s
+[  221.5s] [P0  ] enfriando 60/150 s
+[  251.5s] [P0  ] enfriando 90/150 s
+[  281.5s] [P0  ] enfriando 120/150 s
+[  311.5s] [P0  ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[  311.5s] [R0  ] INICIO  cold_ref   pre=cpof+pwrkey  post=baud+mode
+-----------------------------------------------------------------
+[  311.5s] [R0  ] Vbat aprox 3.57 V
+[  311.5s] [MDM ] --- apagado real del modem (AT+CPOF) ---
+[  311.5s] [AT  ] > AT+CPOF
+[  311.5s] [AT  ] < | OK |   (5 ms)
+[  313.9s] [MDM ] modem APAGADO tras 2336 ms
+[  316.9s] [MDM ] pulso PWRKEY (polaridad main.cpp: LOW-HIGH 1000 ms-LOW)
+[  318.0s] [MDM ] responde AT tras 30 ms
+[  320.0s] [AT  ] > ATE0
+[  320.0s] [AT  ] < ATE0  | OK |   (5 ms)
+[  320.0s] [AT  ] > AT+CGNSSMODE?
+[  320.0s] [AT  ] < | ERROR |   (5 ms)
+[  320.0s] [R0  ] CGNSSMODE antes de encender: ERROR
+[  320.0s] [AT  ] > AT+CGDRT=1,1
+[  320.0s] [AT  ] < | OK |   (6 ms)
+[  320.0s] [AT  ] > AT+CGSETV=1,1
+[  320.0s] [AT  ] < | OK |   (5 ms)
+[  320.0s] [AT  ] > AT+CGNSSPWR=1
+[  320.1s] [AT  ] < | OK |   (70 ms)
+[  350.1s] [GNSS] CGNSSPWR=1 -> sin READY tras 30070 ms
+[  350.1s] [AT  ] > AT+CGNSSIPR=115200
+[  350.7s] [AT  ] < | OK |   (615 ms)
+[  350.7s] [AT  ] > AT+CGNSSMODE=15
+[  350.7s] [AT  ] < | OK |   (15 ms)
+[  350.7s] [R0  ] t=30s poll=1 fix=no sats=0 hdop=-1.0 vacios=1 err=0
+[  358.8s] [R0  ] t=38s poll=5 fix=no sats=0 hdop=-1.0 vacios=5 err=0
+[  368.8s] [R0  ] t=48s poll=10 fix=no sats=0 hdop=-1.0 vacios=10 err=0
+[  378.9s] [R0  ] t=58s poll=15 fix=no sats=0 hdop=-1.0 vacios=15 err=0
+[  388.9s] [R0  ] t=68s poll=20 fix=no sats=0 hdop=-1.0 vacios=20 err=0
+[  399.0s] [R0  ] t=78s poll=25 fix=no sats=0 hdop=-1.0 vacios=25 err=0
+[  409.0s] [R0  ] t=89s poll=30 fix=no sats=0 hdop=-1.0 vacios=30 err=0
+[  419.1s] [R0  ] t=99s poll=35 fix=no sats=0 hdop=-1.0 vacios=35 err=0
+[  429.1s] [R0  ] t=109s poll=40 fix=no sats=0 hdop=-1.0 vacios=40 err=0
+[  437.2s] [R0  ] *** FIX CRUDO a los 117 s   sats=22 hdop=1.8
+[  437.2s] [R0  ] *** FIX QUE PASA EL GATE a los 117 s   sats=22 hdop=1.8
+[  437.2s] [AT  ] > AT+CGNSSMODE?
+[  437.2s] [AT  ] < | +CGNSSMODE: 15 | OK |   (11 ms)
+[  437.2s] [R0  ] CGNSSMODE con GNSS encendido: 15
+[  437.2s] [AT  ] > AT+CGNSSPWR=0
+[  437.2s] [AT  ] < | OK |   (10 ms)
+[  437.2s] [R0  ] FIN
+[  437.2s] [R0  ] GNSS apagado, enfriando 150 s
+[  467.2s] [R0  ] enfriando 30/150 s
+[  497.2s] [R0  ] enfriando 60/150 s
+[  527.2s] [R0  ] enfriando 90/150 s
+[  557.2s] [R0  ] enfriando 120/150 s
+[  587.2s] [R0  ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[  587.2s] [R1  ] INICIO  warm_ctrl   pre=nada  post=nada
+-----------------------------------------------------------------
+[  587.2s] [R1  ] Vbat aprox 4.18 V
+[  587.2s] [AT  ] > AT+CGNSSMODE?
+[  587.3s] [AT  ] < | ERROR |   (6 ms)
+[  587.3s] [R1  ] CGNSSMODE antes de encender: ERROR
+[  587.3s] [AT  ] > AT+CGDRT=1,1
+[  587.3s] [AT  ] < | OK |   (6 ms)
+[  587.3s] [AT  ] > AT+CGSETV=1,1
+[  587.3s] [AT  ] < | OK |   (5 ms)
+[  587.3s] [AT  ] > AT+CGNSSPWR=1
+[  587.3s] [AT  ] < | OK |   (70 ms)
+[  617.3s] [GNSS] CGNSSPWR=1 -> sin READY tras 30070 ms
+[  617.4s] [R1  ] *** FIX CRUDO a los 30 s   sats=32 hdop=1.5
+[  617.4s] [R1  ] *** FIX QUE PASA EL GATE a los 30 s   sats=32 hdop=1.5
+[  617.4s] [AT  ] > AT+CGNSSMODE?
+[  617.4s] [AT  ] < | +CGNSSMODE: 15 | OK |   (11 ms)
+[  617.4s] [R1  ] CGNSSMODE con GNSS encendido: 15
+[  617.4s] [AT  ] > AT+CGNSSPWR=0
+[  617.4s] [AT  ] < | OK |   (10 ms)
+[  617.4s] [R1  ] FIN
+[  617.4s] [R1  ] GNSS apagado, enfriando 150 s
+[  647.4s] [R1  ] enfriando 30/150 s
+[  677.4s] [R1  ] enfriando 60/150 s
+[  707.4s] [R1  ] enfriando 90/150 s
+[  737.4s] [R1  ] enfriando 120/150 s
+[  767.4s] [R1  ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[  767.4s] [R2  ] INICIO  creset   pre=creset  post=nada
+-----------------------------------------------------------------
+[  767.4s] [R2  ] Vbat aprox 4.18 V
+[  767.4s] [MDM ] --- AT+CRESET ---
+[  767.4s] [AT  ] > AT+CRESET
+[  767.4s] [AT  ] < | OK |   (6 ms)
+[  768.4s] [MDM ] responde AT tras 6 ms
+[  770.4s] [AT  ] > ATE0
+[  770.4s] [AT  ] < ATE0  | OK |   (5 ms)
+[  770.4s] [AT  ] > AT+CGNSSMODE?
+[  770.4s] [AT  ] < | ERROR |   (5 ms)
+[  770.4s] [R2  ] CGNSSMODE antes de encender: ERROR
+[  770.4s] [AT  ] > AT+CGDRT=1,1
+[  770.4s] [AT  ] < | OK |   (6 ms)
+[  770.4s] [AT  ] > AT+CGSETV=1,1
+[  770.4s] [AT  ] < | OK |   (5 ms)
+[  770.4s] [AT  ] > AT+CGNSSPWR=1
+[  770.5s] [AT  ] < | OK |   (70 ms)
+[  800.5s] [GNSS] CGNSSPWR=1 -> sin READY tras 30070 ms
+[  800.5s] [R2  ] t=30s poll=1 fix=no sats=0 hdop=-1.0 vacios=1 err=0
+[  808.6s] [R2  ] t=38s poll=5 fix=no sats=0 hdop=-1.0 vacios=5 err=0
+[  812.6s] [R2  ] *** FIX CRUDO a los 42 s   sats=23 hdop=1.6
+[  812.6s] [R2  ] *** FIX QUE PASA EL GATE a los 42 s   sats=23 hdop=1.6
+[  812.6s] [AT  ] > AT+CGNSSMODE?
+[  812.6s] [AT  ] < | +CGNSSMODE: 15 | OK |   (11 ms)
+[  812.6s] [R2  ] CGNSSMODE con GNSS encendido: 15
+[  812.6s] [AT  ] > AT+CGNSSPWR=0
+[  812.6s] [AT  ] < | OK |   (10 ms)
+[  812.6s] [R2  ] FIN
+[  812.6s] [R2  ] GNSS apagado, enfriando 150 s
+[  842.6s] [R2  ] enfriando 30/150 s
+[  872.6s] [R2  ] enfriando 60/150 s
+[  902.6s] [R2  ] enfriando 90/150 s
+[  932.6s] [R2  ] enfriando 120/150 s
+[  962.6s] [R2  ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[  962.6s] [R3  ] INICIO  dtr_sleep   pre=dtr_sleep  post=nada
+-----------------------------------------------------------------
+[  962.6s] [R3  ] Vbat aprox 4.18 V
+[  962.6s] [MDM ] --- sueno por DTR: CSCLK=1 + DTR HIGH 120 s ---
+[  962.6s] [AT  ] > AT+CSCLK=1
+[  962.7s] [AT  ] < | OK |   (6 ms)
+[  969.2s] [MDM ] con DTR alto el modem no contesta (durmio)
+[  999.2s] [MDM ] dormido por DTR 30/120 s
+[ 1029.2s] [MDM ] dormido por DTR 60/120 s
+[ 1059.2s] [MDM ] dormido por DTR 90/120 s
+[ 1089.2s] [MDM ] dormido por DTR 120/120 s
+[ 1089.4s] [MDM ] responde AT tras 5 ms
+[ 1089.4s] [AT  ] > AT+CSCLK=0
+[ 1089.4s] [AT  ] < | OK |   (5 ms)
+[ 1089.4s] [AT  ] > AT+CGNSSMODE?
+[ 1089.4s] [AT  ] < | ERROR |   (5 ms)
+[ 1089.4s] [R3  ] CGNSSMODE antes de encender: ERROR
+[ 1089.4s] [AT  ] > AT+CGDRT=1,1
+[ 1089.4s] [AT  ] < | OK |   (6 ms)
+[ 1089.4s] [AT  ] > AT+CGSETV=1,1
+[ 1089.4s] [AT  ] < | OK |   (5 ms)
+[ 1089.4s] [AT  ] > AT+CGNSSPWR=1
+[ 1089.4s] [AT  ] < | OK |   (70 ms)
+[ 1119.4s] [GNSS] CGNSSPWR=1 -> sin READY tras 30070 ms
+[ 1119.5s] [R3  ] t=30s poll=1 fix=no sats=0 hdop=-1.0 vacios=1 err=0
+[ 1127.5s] [R3  ] t=38s poll=5 fix=no sats=0 hdop=-1.0 vacios=5 err=0
+[ 1137.6s] [R3  ] t=48s poll=10 fix=no sats=0 hdop=-1.0 vacios=10 err=0
+[ 1147.6s] [R3  ] t=58s poll=15 fix=no sats=0 hdop=-1.0 vacios=15 err=0
+[ 1157.7s] [R3  ] t=68s poll=20 fix=no sats=0 hdop=-1.0 vacios=20 err=0
+[ 1167.7s] [R3  ] t=78s poll=25 fix=no sats=0 hdop=-1.0 vacios=25 err=0
+[ 1177.8s] [R3  ] t=88s poll=30 fix=no sats=0 hdop=-1.0 vacios=30 err=0
+[ 1187.8s] [R3  ] t=98s poll=35 fix=no sats=0 hdop=-1.0 vacios=35 err=0
+[ 1197.9s] [R3  ] t=108s poll=40 fix=no sats=0 hdop=-1.0 vacios=40 err=0
+[ 1207.9s] [R3  ] t=118s poll=45 fix=no sats=0 hdop=-1.0 vacios=45 err=0
+[ 1210.0s] [R3  ] *** FIX CRUDO a los 120 s   sats=28 hdop=1.3
+[ 1210.0s] [R3  ] *** FIX QUE PASA EL GATE a los 120 s   sats=28 hdop=1.3
+[ 1210.0s] [AT  ] > AT+CGNSSMODE?
+[ 1210.0s] [AT  ] < | +CGNSSMODE: 15 | OK |   (11 ms)
+[ 1210.0s] [R3  ] CGNSSMODE con GNSS encendido: 15
+[ 1210.0s] [AT  ] > AT+CGNSSPWR=0
+[ 1210.0s] [AT  ] < | OK |   (10 ms)
+[ 1210.0s] [R3  ] FIN
+[ 1210.0s] [R3  ] GNSS apagado, enfriando 150 s
+[ 1240.0s] [R3  ] enfriando 30/150 s
+[ 1270.0s] [R3  ] enfriando 60/150 s
+[ 1300.0s] [R3  ] enfriando 90/150 s
+[ 1330.0s] [R3  ] enfriando 120/150 s
+[ 1360.0s] [R3  ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[ 1360.0s] [R4  ] INICIO  cgnssmode15   pre=nada  post=baud+mode
+-----------------------------------------------------------------
+[ 1360.0s] [R4  ] Vbat aprox 4.18 V
+[ 1360.0s] [AT  ] > AT+CGNSSMODE?
+[ 1360.0s] [AT  ] < | ERROR |   (6 ms)
+[ 1360.0s] [R4  ] CGNSSMODE antes de encender: ERROR
+[ 1360.0s] [AT  ] > AT+CGDRT=1,1
+[ 1360.0s] [AT  ] < | OK |   (6 ms)
+[ 1360.0s] [AT  ] > AT+CGSETV=1,1
+[ 1360.0s] [AT  ] < | OK |   (5 ms)
+[ 1360.0s] [AT  ] > AT+CGNSSPWR=1
+[ 1360.1s] [AT  ] < | OK |   (70 ms)
+[ 1390.1s] [GNSS] CGNSSPWR=1 -> sin READY tras 30070 ms
+[ 1390.1s] [AT  ] > AT+CGNSSIPR=115200
+[ 1390.7s] [AT  ] < | OK |   (615 ms)
+[ 1390.7s] [AT  ] > AT+CGNSSMODE=15
+[ 1390.7s] [AT  ] < | OK |   (15 ms)
+[ 1390.8s] [R4  ] *** FIX CRUDO a los 30 s   sats=0 hdop=-1.0
+[ 1390.8s] [R4  ] t=30s poll=1 fix=si sats=0 hdop=-1.0 vacios=0 err=0
+[ 1398.8s] [R4  ] t=38s poll=5 fix=no sats=0 hdop=-1.0 vacios=4 err=0
+[ 1400.8s] [R4  ] *** FIX QUE PASA EL GATE a los 40 s   sats=31 hdop=1.3
+[ 1400.8s] [AT  ] > AT+CGNSSMODE?
+[ 1400.8s] [AT  ] < | +CGNSSMODE: 15 | OK |   (11 ms)
+[ 1400.8s] [R4  ] CGNSSMODE con GNSS encendido: 15
+[ 1400.8s] [AT  ] > AT+CGNSSPWR=0
+[ 1400.8s] [AT  ] < | OK |   (10 ms)
+[ 1400.8s] [R4  ] FIN
+[ 1400.8s] [R4  ] GNSS apagado, enfriando 150 s
+[ 1430.8s] [R4  ] enfriando 30/150 s
+[ 1460.8s] [R4  ] enfriando 60/150 s
+[ 1490.8s] [R4  ] enfriando 90/150 s
+[ 1520.8s] [R4  ] enfriando 120/150 s
+[ 1550.8s] [R4  ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[ 1550.8s] [R5  ] INICIO  pwrkey_pulse   pre=pwrkey_pulse  post=nada
+-----------------------------------------------------------------
+[ 1550.9s] [R5  ] Vbat aprox 4.18 V
+[ 1550.9s] [MDM ] --- pulso de PWRKEY sobre modem VIVO (sospechoso 3) ---
+[ 1550.9s] [MDM ] pulso PWRKEY (polaridad main.cpp: LOW-HIGH 1000 ms-LOW)
+[ 1557.0s] [MDM ] el pulso NO tumbo el modem
+[ 1557.0s] [AT  ] > AT+CGNSSMODE?
+[ 1557.0s] [AT  ] < | ERROR |   (5 ms)
+[ 1557.0s] [R5  ] CGNSSMODE antes de encender: ERROR
+[ 1557.0s] [AT  ] > AT+CGDRT=1,1
+[ 1557.0s] [AT  ] < | OK |   (6 ms)
+[ 1557.0s] [AT  ] > AT+CGSETV=1,1
+[ 1557.0s] [AT  ] < | OK |   (5 ms)
+[ 1557.0s] [AT  ] > AT+CGNSSPWR=1
+[ 1557.1s] [AT  ] < | OK |   (70 ms)
+[ 1587.1s] [GNSS] CGNSSPWR=1 -> sin READY tras 30070 ms
+[ 1587.1s] [R5  ] *** FIX CRUDO a los 30 s   sats=30 hdop=1.3
+[ 1587.1s] [R5  ] *** FIX QUE PASA EL GATE a los 30 s   sats=30 hdop=1.3
+[ 1587.1s] [AT  ] > AT+CGNSSMODE?
+[ 1587.1s] [AT  ] < | +CGNSSMODE: 15 | OK |   (11 ms)
+[ 1587.1s] [R5  ] CGNSSMODE con GNSS encendido: 15
+[ 1587.1s] [AT  ] > AT+CGNSSPWR=0
+[ 1587.1s] [AT  ] < | OK |   (10 ms)
+[ 1587.1s] [R5  ] FIN
+[ 1587.1s] [R5  ] GNSS apagado, enfriando 150 s
+[ 1617.1s] [R5  ] enfriando 30/150 s
+[ 1647.1s] [R5  ] enfriando 60/150 s
+[ 1677.1s] [R5  ] enfriando 90/150 s
+[ 1707.1s] [R5  ] enfriando 120/150 s
+[ 1737.1s] [R5  ] enfriando 150/150 s
+[ 1737.1s] [AT  ] > AT+CGNSSPWR=0
+[ 1737.1s] [AT  ] < | OK |   (5 ms)
+
+=================================================================
+ RESUMEN GNSS LAB
+=================================================================
+ cielo (baseline): fix crudo en 124 s, sats 26, hdop 1.7
+-----------------------------------------------------------------
+run variable      pre           post       ttff_raw ttff_val  sats  hdop vacios   err mode_pre mode_post  nota
+R0  cold_ref      cpof+pwrkey   baud+mode      117s     117s    22   1.8     43     0    ERROR        15  CGNSSPWR=1 sin READY
+R1  warm_ctrl     nada          nada            30s      30s    32   1.5      0     0    ERROR        15  CGNSSPWR=1 sin READY
+R2  creset        creset        nada            42s      42s    23   1.6      6     0    ERROR        15  AT vuelve 0s tras CRESET
+R3  dtr_sleep     dtr_sleep     nada           120s     120s    28   1.3     45     0    ERROR        15  durmio y despertio por DTR
+R4  cgnssmode15   nada          baud+mode       30s      40s    31   1.3      4     0    ERROR        15  CGNSSPWR=1 sin READY
+R5  pwrkey_pulse  pwrkey_pulse  nada            30s      30s    30   1.3      0     0    ERROR        15  el pulso NO tumbo el modem
+
+=== CSV (pegar en el log de sesion) ===
+run,variable,pre,post,ttff_raw_s,ttff_valid_s,sats,hdop,polls_vacios,polls_error,polls_total,mode_pre,mode_post,vbat,nota
+R0,cold_ref,cpof+pwrkey,baud+mode,117,117,22,1.8,43,0,44,ERROR,15,3.57,CGNSSPWR=1 sin READY
+R1,warm_ctrl,nada,nada,30,30,32,1.5,0,0,1,ERROR,15,4.18,CGNSSPWR=1 sin READY
+R2,creset,creset,nada,42,42,23,1.6,6,0,7,ERROR,15,4.18,AT vuelve 0s tras CRESET
+R3,dtr_sleep,dtr_sleep,nada,120,120,28,1.3,45,0,46,ERROR,15,4.18,durmio y despertio por DTR
+R4,cgnssmode15,nada,baud+mode,30,40,31,1.3,4,0,6,ERROR,15,4.18,CGNSSPWR=1 sin READY
+R5,pwrkey_pulse,pwrkey_pulse,nada,30,30,30,1.3,0,0,1,ERROR,15,4.18,el pulso NO tumbo el modem
+P0,baseline_cielo,-,-,124,-1,26,1.7,0,0,0,-,-,0.00,cielo suficiente
+=== fin CSV ===
+
+Lectura rapida:
+ - R1 corto y otra corrida larga -> esa es la culpable, F19 = no hacer eso.
+ - R1 tambien largo -> el NVRAM no retiene: F19 muere, va F23 (ventana de gracia).
+ - ttff_raw corto y ttff_valid largo -> el problema es el gate, no el NVRAM.
+ - R5 con nota 'el pulso APAGO el modem' -> hay que guardar rtcModemAlive de verdad.
+
+Este env NO es el tracker. Para volver a produccion:
+  pio run -e tracker -t upload
+=================================================================
+
+=================================================================
+ RESUMEN GNSS LAB
+=================================================================
+ cielo (baseline): fix crudo en 124 s, sats 26, hdop 1.7
+-----------------------------------------------------------------
+run variable      pre           post       ttff_raw ttff_val  sats  hdop vacios   err mode_pre mode_post  nota
+R0  cold_ref      cpof+pwrkey   baud+mode      117s     117s    22   1.8     43     0    ERROR        15  CGNSSPWR=1 sin READY
+R1  warm_ctrl     nada          nada            30s      30s    32   1.5      0     0    ERROR        15  CGNSSPWR=1 sin READY
+R2  creset        creset        nada            42s      42s    23   1.6      6     0    ERROR        15  AT vuelve 0s tras CRESET
+R3  dtr_sleep     dtr_sleep     nada           120s     120s    28   1.3     45     0    ERROR        15  durmio y despertio por DTR
+R4  cgnssmode15   nada          baud+mode       30s      40s    31   1.3      4     0    ERROR        15  CGNSSPWR=1 sin READY
+R5  pwrkey_pulse  pwrkey_pulse  nada            30s      30s    30   1.3      0     0    ERROR        15  el pulso NO tumbo el modem
+
+=== CSV (pegar en el log de sesion) ===
+run,variable,pre,post,ttff_raw_s,ttff_valid_s,sats,hdop,polls_vacios,polls_error,polls_total,mode_pre,mode_post,vbat,nota
+R0,cold_ref,cpof+pwrkey,baud+mode,117,117,22,1.8,43,0,44,ERROR,15,3.57,CGNSSPWR=1 sin READY
+R1,warm_ctrl,nada,nada,30,30,32,1.5,0,0,1,ERROR,15,4.18,CGNSSPWR=1 sin READY
+R2,creset,creset,nada,42,42,23,1.6,6,0,7,ERROR,15,4.18,AT vuelve 0s tras CRESET
+R3,dtr_sleep,dtr_sleep,nada,120,120,28,1.3,45,0,46,ERROR,15,4.18,durmio y despertio por DTR
+R4,cgnssmode15,nada,baud+mode,30,40,31,1.3,4,0,6,ERROR,15,4.18,CGNSSPWR=1 sin READY
+R5,pwrkey_pulse,pwrkey_pulse,nada,30,30,30,1.3,0,0,1,ERROR,15,4.18,el pulso NO tumbo el modem
+P0,baseline_cielo,-,-,124,-1,26,1.7,0,0,0,-,-,0.00,cielo suficiente
+=== fin CSV ===
+
+Lectura rapida:
+ - R1 corto y otra corrida larga -> esa es la culpable, F19 = no hacer eso.
+ - R1 tambien largo -> el NVRAM no retiene: F19 muere, va F23 (ventana de gracia).
+ - ttff_raw corto y ttff_valid largo -> el problema es el gate, no el NVRAM.
+ - R5 con nota 'el pulso APAGO el modem' -> hay que guardar rtcModemAlive de verdad.
+
+Este env NO es el tracker. Para volver a produccion:
+  pio run -e tracker -t upload
+=================================================================
+
+=================================================================
+ RESUMEN GNSS LAB
+=================================================================
+ cielo (baseline): fix crudo en 124 s, sats 26, hdop 1.7
+-----------------------------------------------------------------
+run variable      pre           post       ttff_raw ttff_val  sats  hdop vacios   err mode_pre mode_post  nota
+R0  cold_ref      cpof+pwrkey   baud+mode      117s     117s    22   1.8     43     0    ERROR        15  CGNSSPWR=1 sin READY
+R1  warm_ctrl     nada          nada            30s      30s    32   1.5      0     0    ERROR        15  CGNSSPWR=1 sin READY
+R2  creset        creset        nada            42s      42s    23   1.6      6     0    ERROR        15  AT vuelve 0s tras CRESET
+R3  dtr_sleep     dtr_sleep     nada           120s     120s    28   1.3     45     0    ERROR        15  durmio y despertio por DTR
+R4  cgnssmode15   nada          baud+mode       30s      40s    31   1.3      4     0    ERROR        15  CGNSSPWR=1 sin READY
+R5  pwrkey_pulse  pwrkey_pulse  nada            30s      30s    30   1.3      0     0    ERROR        15  el pulso NO tumbo el modem
+
+=== CSV (pegar en el log de sesion) ===
+run,variable,pre,post,ttff_raw_s,ttff_valid_s,sats,hdop,polls_vacios,polls_error,polls_total,mode_pre,mode_post,vbat,nota
+R0,cold_ref,cpof+pwrkey,baud+mode,117,117,22,1.8,43,0,44,ERROR,15,3.57,CGNSSPWR=1 sin READY
+R1,warm_ctrl,nada,nada,30,30,32,1.5,0,0,1,ERROR,15,4.18,CGNSSPWR=1 sin READY
+R2,creset,creset,nada,42,42,23,1.6,6,0,7,ERROR,15,4.18,AT vuelve 0s tras CRESET
+R3,dtr_sleep,dtr_sleep,nada,120,120,28,1.3,45,0,46,ERROR,15,4.18,durmio y despertio por DTR
+R4,cgnssmode15,nada,baud+mode,30,40,31,1.3,4,0,6,ERROR,15,4.18,CGNSSPWR=1 sin READY
+R5,pwrkey_pulse,pwrkey_pulse,nada,30,30,30,1.3,0,0,1,ERROR,15,4.18,el pulso NO tumbo el modem
+P0,baseline_cielo,-,-,124,-1,26,1.7,0,0,0,-,-,0.00,cielo suficiente
+=== fin CSV ===
+
+Lectura rapida:
+ - R1 corto y otra corrida larga -> esa es la culpable, F19 = no hacer eso.
+ - R1 tambien largo -> el NVRAM no retiene: F19 muere, va F23 (ventana de gracia).
+ - ttff_raw corto y ttff_valid largo -> el problema es el gate, no el NVRAM.
+ - R5 con nota 'el pulso APAGO el modem' -> hay que guardar rtcModemAlive de verdad.
+
+Este env NO es el tracker. Para volver a produccion:
+  pio run -e tracker -t upload
+=================================================================

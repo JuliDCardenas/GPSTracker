@@ -1,0 +1,13 @@
+# Fragmento para fusionar en /home/ubuntu/mosquitto/docker-compose.yml
+services:
+  subscriber-json-osmand:
+    build: ./GPSTracker/server
+    environment:
+      EVENT_DB_PATH: /data/event_state.sqlite3
+      MQTT_EVENT_TOPIC: tracker/Lilygo/event/ignition/v3
+      MQTT_EVENT_ACK_TOPIC: tracker/Lilygo/ack/ignition/v3
+    volumes:
+      - subscriber_event_state:/data
+
+volumes:
+  subscriber_event_state:

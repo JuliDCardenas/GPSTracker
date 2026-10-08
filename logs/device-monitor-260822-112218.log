@@ -1,0 +1,109 @@
+[   10.7s] [LAB ] estado inicial del modem: VIVO (el flasheo por USB no lo apago)
+[   11.7s] [AT  ] > ATE0
+[   11.7s] [AT  ] < | OK |   (5 ms)
+[   11.7s] [AT  ] > AT+SIMCOMATI
+[   11.7s] [AT  ] < | Manufacturer: SIMCOM INCORPORATED | Model: SIM7670G-MNGV | Revision: 2374B05SIM767XM5A_M | SIM767XM5_B05V01_241206 | IMEI: 864643061465631 | OK |   (18 ms)
+[   11.7s] [AT  ] > AT+CSCLK?
+[   11.7s] [AT  ] < | +CSCLK: 0 | OK |   (6 ms)
+[   11.7s] [AT  ] > AT+CGNSSPWR?
+[   11.7s] [AT  ] < | +CGNSSPWR: 0 | OK |   (6 ms)
+
+[   11.7s] [NET ] --- levantando la red (techo 90 s) ---
+[   11.7s] [AT  ] > AT+CPIN?
+[   11.7s] [AT  ] < | +CPIN: READY | OK |   (6 ms)
+[   11.7s] [AT  ] > AT+CSQ
+[   11.7s] [AT  ] < | +CSQ: 24,0 | OK |   (6 ms)
+[   11.7s] [AT  ] > AT+CEREG?
+[   11.7s] [AT  ] < | +CEREG: 0,5 | OK |   (6 ms)
+[   11.7s] [NET ] registro OK tras 0 s
+[   11.7s] [AT  ] > AT+IPADDR
+[   11.7s] [AT  ] < | +IP ERROR: Network not opened | ERROR |   (11 ms)
+[   11.7s] [NET ] sin IP todavia, activo el contexto PDP
+[   11.7s] [AT  ] > AT+CGACT=1,1
+[   11.7s] [AT  ] < | OK |   (5 ms)
+[   13.7s] [AT  ] > AT+IPADDR
+[   13.8s] [AT  ] < | +IP ERROR: Network not opened | ERROR |   (11 ms)
+[   13.8s] [NET ] IP: ERROR -> A-GNSS NO va a poder bajar nada
+[   13.8s] [LAB ] dejo el GNSS apagado 20 s para partir de un estado conocido
+[   13.8s] [AT  ] > AT+CGNSSPWR=0
+[   13.8s] [AT  ] < | OK |   (5 ms)
+
+-----------------------------------------------------------------
+[   33.8s] [P0 ] BASELINE DE CIELO: enciendo GNSS y espero fix crudo (max 240 s)
+-----------------------------------------------------------------
+[   33.8s] [AT  ] > AT+CGDRT=1,1
+[   33.8s] [AT  ] < | OK |   (5 ms)
+[   33.8s] [AT  ] > AT+CGSETV=1,1
+[   33.8s] [AT  ] < | OK |   (5 ms)
+[   33.8s] [AT  ] > AT+CGNSSPWR=1
+[   33.8s] [AT  ] < | OK |   (70 ms)
+[   35.8s] [GNSS] AT+CGNSSPWR=1 -> OK (sin READY, normal en este firmware) tras 2070 ms
+[   39.9s] [P0 ] t=6s sats=0 hdop=-1.0 (sin fix aun)
+[   44.9s] [P0 ] t=11s sats=0 hdop=-1.0 (sin fix aun)
+[   50.0s] [P0 ] t=16s sats=0 hdop=-1.0 (sin fix aun)
+[   55.1s] [P0 ] t=21s sats=0 hdop=-1.0 (sin fix aun)
+[   60.1s] [P0 ] t=26s sats=0 hdop=-1.0 (sin fix aun)
+[   65.2s] [P0 ] t=31s sats=0 hdop=-1.0 (sin fix aun)
+[   70.2s] [P0 ] t=36s sats=0 hdop=-1.0 (sin fix aun)
+[   75.3s] [P0 ] t=41s sats=0 hdop=-1.0 (sin fix aun)
+[   80.3s] [P0 ] t=46s sats=0 hdop=-1.0 (sin fix aun)
+[   85.4s] [P0 ] t=51s sats=0 hdop=-1.0 (sin fix aun)
+[   90.4s] [P0 ] t=56s sats=0 hdop=-1.0 (sin fix aun)
+[   94.5s] [P0 ] fix crudo a los 60 s  sats=27 hdop=1.6 -> el cielo alcanza
+
+[   94.5s] [LAB ] sondeo de capacidades con el motor ENCENDIDO (informativo)
+[   94.5s] [AT  ] > AT+CGNSSPROD
+[   96.0s] [AT  ] < | PRODUCT: B03V01AG3352B | OK |   (1511 ms)
+[   96.0s] [AT  ] > AT+CGNSSMODE?
+[   96.0s] [AT  ] < | +CGNSSMODE: 15 | OK |   (11 ms)
+[   96.0s] [AT  ] > AT+CGNSSRTC?
+[   96.0s] [AT  ] < | ERROR |   (5 ms)
+[   96.0s] [AT  ] > AT+CGNSSSLEEP=?
+[   96.0s] [AT  ] < | ERROR |   (5 ms)
+[   96.0s] [AT  ] > AT+CGNSSFLP=?
+[   96.0s] [AT  ] < | +CGNSSFLP: (0,1),(3-518400),(3-518400),(3-518400),(3-518400) | OK |   (12 ms)
+[   96.0s] [AT  ] > AT+CGNSSAGPS=?
+[   96.0s] [AT  ] < | ERROR |   (5 ms)
+[   96.0s] [LAB ] pruebo AT+CGPSHOT ejecutandolo (no tiene forma de test)
+[   96.0s] [AT  ] > AT+CGPSHOT
+[   96.1s] [AT  ] < | OK |   (9 ms)
+[   96.1s] [LAB ] CGPSHOT=si -> la familia CGPSxxx existe en este firmware
+[   96.1s] [AT  ] > AT+CGNSSPWR=0
+[   96.1s] [AT  ] < | OK |   (10 ms)
+[   96.1s] [P0 ] GNSS apagado, enfriando 150 s
+[  126.1s] [P0 ] enfriando 30/150 s
+[  156.1s] [P0 ] enfriando 60/150 s
+[  186.1s] [P0 ] enfriando 90/150 s
+[  216.1s] [P0 ] enfriando 120/150 s
+[  246.1s] [P0 ] enfriando 150/150 s
+
+-----------------------------------------------------------------
+[  246.1s] [T1 ] INICIO  warm_ctrl   pre=nada  start=pwr
+-----------------------------------------------------------------
+[  246.1s] [T1 ] Vbat aprox 4.17 V
+[  246.1s] [T1 ] el GNSS lleva 150 s sin trabajar
+[  246.1s] [AT  ] > AT+CGDRT=1,1
+[  246.1s] [AT  ] < | OK |   (5 ms)
+[  246.1s] [AT  ] > AT+CGSETV=1,1
+[  246.1s] [AT  ] < | OK |   (5 ms)
+[  246.1s] [AT  ] > AT+CGNSSPWR=1
+[  246.2s] [AT  ] < | OK |   (70 ms)
+[  248.2s] [GNSS] AT+CGNSSPWR=1 -> OK (sin READY, normal en este firmware) tras 2070 ms
+[  248.2s] [T1 ] t=2s poll=1 fix=no sats=0 hdop=-1.0 vacios=1 err=0
+[  252.2s] [T1 ] t=6s poll=5 fix=no sats=0 hdop=-1.0 vacios=5 err=0
+[  257.3s] [T1 ] t=11s poll=10 fix=no sats=0 hdop=-1.0 vacios=10 err=0
+[  262.4s] [T1 ] t=16s poll=15 fix=no sats=0 hdop=-1.0 vacios=15 err=0
+[  267.4s] [T1 ] t=21s poll=20 fix=no sats=0 hdop=-1.0 vacios=20 err=0
+[  272.5s] [T1 ] t=26s poll=25 fix=no sats=0 hdop=-1.0 vacios=25 err=0
+[  277.5s] [T1 ] t=31s poll=30 fix=no sats=0 hdop=-1.0 vacios=30 err=0
+[  282.6s] [T1 ] t=36s poll=35 fix=no sats=0 hdop=-1.0 vacios=35 err=0
+[  287.6s] [T1 ] t=41s poll=40 fix=no sats=0 hdop=-1.0 vacios=40 err=0
+[  290.7s] [T1 ] *** FIX CRUDO a los 44 s   sats=27 hdop=1.4
+[  290.7s] [T1 ] *** FIX QUE PASA EL GATE a los 44 s   sats=27 hdop=1.4
+[  290.7s] [AT  ] > AT+CGNSSMODE?
+[  290.7s] [AT  ] < | +CGNSSMODE: 15 | OK |   (11 ms)
+[  290.7s] [T1 ] CGNSSMODE con GNSS encendido: 15
+[  290.7s] [AT  ] > AT+CGNSSPWR=0
+[  290.7s] [AT  ] < | OK |   (10 ms)
+[  290.7s] [T1 ] FIN
+[  290.7s] [T1 ] GNSS apagado, enfriando 150 s
